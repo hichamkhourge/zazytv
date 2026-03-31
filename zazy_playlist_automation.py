@@ -52,9 +52,22 @@ solver = TwoCaptcha(TWOCAPTCHA_API_KEY) if TWOCAPTCHA_API_KEY else None
 
 def get_driver():
     options = Options()
-    # options.add_argument("--headless")
-    options.add_argument("--start-maximized")
-    options.add_experimental_option("detach", True)
+
+    # Enable headless mode for Docker/server environments
+    # Set HEADLESS=False in .env to disable for local development
+    headless_mode = os.getenv("HEADLESS", "True").lower() == "true"
+
+    if headless_mode:
+        options.add_argument("--headless=new")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+        print("[*] Running in HEADLESS mode")
+    else:
+        options.add_argument("--start-maximized")
+        options.add_experimental_option("detach", True)
+        print("[*] Running in GUI mode")
 
     print("[*] Downloading/verifying ChromeDriver...")
     driver_service = Service(ChromeDriverManager().install())
@@ -1243,19 +1256,38 @@ def main():
             print("[*] You may need to navigate manually to the service details.")
 
         print("\n[✓] Automation complete!")
-        print("[*] The browser will remain open to view the result.")
-        print("[*] Press Ctrl+C in this terminal when you are ready to quit.")
 
-        while True:
-            time.sleep(1)
+        # Check if we should keep browser open or exit
+        auto_exit = os.getenv("AUTO_EXIT", "True").lower() == "true"
+
+        if auto_exit:
+            print("[*] AUTO_EXIT enabled - closing browser and exiting...")
+            driver.quit()
+            print("[✓] Browser closed. Script completed successfully.")
+        else:
+            print("[*] The browser will remain open to view the result.")
+            print("[*] Press Ctrl+C in this terminal when you are ready to quit.")
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\n[*] Interrupt received. Closing browser...")
+                driver.quit()
 
     except Exception as e:
         import traceback
         print(f"\n[✗] An error occurred: {e}")
         traceback.print_exc()
-        print("[*] Leaving browser open for debugging.")
-        input("Press Enter to close the browser and exit...")
-        driver.quit()
+
+        # Always quit driver on error
+        try:
+            driver.quit()
+            print("[*] Browser closed.")
+        except:
+            pass
+
+        # Exit with error code for cron/docker monitoring
+        exit(1)
 
 
 if __name__ == '__main__':

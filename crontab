@@ -1,0 +1,12 @@
+# Zazy TV Automation - Daily Schedule
+# Runs every day at 03:00 AM UTC
+# Format: minute hour day month weekday command
+#
+# Make sure to set TZ environment variable in docker-compose.yml
+# to match your desired timezone
+
+# Run automation at 3:00 AM daily
+0 3 * * * cd /app && /usr/local/bin/python /app/zazy_playlist_automation.py >> /var/log/cron.log 2>&1
+
+# Keep cron happy with a newline at the end
+

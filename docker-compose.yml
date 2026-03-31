@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  zazy-automation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: zazy-automation
+    restart: unless-stopped
+    environment:
+      # 2captcha Configuration
+      - TWOCAPTCHA_API_KEY=${TWOCAPTCHA_API_KEY}
+
+      # URLs
+      - BASE_URL=${BASE_URL:-https://zazyhost.com}
+      - HOME_URL=${HOME_URL:-https://zazytv.com/}
+
+      # Login Credentials (optional)
+      - LOGIN_EMAIL=${LOGIN_EMAIL:-your@email.com}
+      - LOGIN_PASSWORD=${LOGIN_PASSWORD:-yourpassword}
+      - SKIP_LOGIN=${SKIP_LOGIN:-True}
+
+      # Promo Code
+      - PROMO_CODE=${PROMO_CODE:-}
+
+      # IBO Player Configuration
+      - IBOPLAYER_COOKIE=${IBOPLAYER_COOKIE}
+      - IBOPLAYER_PLAYLIST_URL_ID=${IBOPLAYER_PLAYLIST_URL_ID}
+      - IBOPLAYER_PLAYLIST_NAME=${IBOPLAYER_PLAYLIST_NAME:-Zazy}
+      - IBOPLAYER_PLAYLIST_URL=${IBOPLAYER_PLAYLIST_URL:-http://live.zazytv.com}
+
+      # Timezone for cron
+      - TZ=${TZ:-UTC}
+
+    volumes:
+      # Persistent storage for playlists
+      - zazy-playlists:/app/playlists
+
+      # Mount .env file (alternative to env_file)
+      - ./.env:/app/.env:ro
+
+      # Optional: Mount logs
+      - zazy-logs:/var/log
+
+    networks:
+      - zazy-network
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "test", "-f", "/var/run/crond.pid"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  zazy-playlists:
+    driver: local
+  zazy-logs:
+    driver: local
+
+networks:
+  zazy-network:
+    driver: bridge
