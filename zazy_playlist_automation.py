@@ -31,6 +31,9 @@ from webdriver_manager.chrome import ChromeDriverManager
 # Load environment variables from .env file
 load_dotenv()
 
+# Import Telegram notifier
+from telegram_notifier import notifier
+
 # Configuration from environment variables
 TWOCAPTCHA_API_KEY = os.getenv("TWOCAPTCHA_API_KEY")
 BASE_URL = os.getenv("BASE_URL", "https://zazyhost.com")
@@ -1272,6 +1275,19 @@ def main():
 
         print("\n[✓] Automation complete!")
 
+        # Get 2captcha balance for notification
+        captcha_balance = None
+        if solver:
+            try:
+                captcha_balance = solver.balance()
+                print(f"[*] 2captcha balance: ${captcha_balance}")
+            except Exception as e:
+                print(f"[!] Could not retrieve 2captcha balance: {e}")
+
+        # Send completion success notification
+        if m3u_url:
+            notifier.notify_success(m3u_url, username, captcha_balance)
+
         # Check if we should keep browser open or exit
         auto_exit = os.getenv("AUTO_EXIT", "True").lower() == "true"
 
@@ -1291,8 +1307,21 @@ def main():
 
     except Exception as e:
         import traceback
+        error_traceback = traceback.format_exc()
         print(f"\n[✗] An error occurred: {e}")
-        traceback.print_exc()
+        print(error_traceback)
+
+        # Get 2captcha balance for notification
+        captcha_balance = None
+        if solver:
+            try:
+                captcha_balance = solver.balance()
+                print(f"[*] 2captcha balance: ${captcha_balance}")
+            except Exception as balance_error:
+                print(f"[!] Could not retrieve 2captcha balance: {balance_error}")
+
+        # Send error notification
+        notifier.notify_error(str(e), error_traceback, captcha_balance)
 
         # Always quit driver on error
         try:
