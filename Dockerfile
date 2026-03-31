@@ -23,6 +23,21 @@ RUN wget -q -O /tmp/google-chrome-key.pub https://dl-ssl.google.com/linux/linux_
     && apt-get install -y google-chrome-stable \
     && rm -rf /var/lib/apt/lists/* /tmp/google-chrome-key.pub
 
+# Install ChromeDriver
+RUN CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d. -f1-3) \
+    && echo "Chrome version: $CHROME_VERSION" \
+    && CHROMEDRIVER_VERSION=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_${CHROME_VERSION%%.*}") \
+    && echo "ChromeDriver version: $CHROMEDRIVER_VERSION" \
+    && wget -q "https://storage.googleapis.com/chrome-for-testing-public/${CHROMEDRIVER_VERSION}/linux64/chromedriver-linux64.zip" -O /tmp/chromedriver.zip \
+    && unzip -q /tmp/chromedriver.zip -d /tmp/ \
+    && mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver \
+    && chmod +x /usr/local/bin/chromedriver \
+    && rm -rf /tmp/chromedriver.zip /tmp/chromedriver-linux64 \
+    && chromedriver --version
+
+# Set ChromeDriver path environment variable
+ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
+
 # Create app directory
 WORKDIR /app
 

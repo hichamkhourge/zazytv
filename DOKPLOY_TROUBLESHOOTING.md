@@ -1,5 +1,29 @@
 # Dokploy Deployment Troubleshooting
 
+## Error: Container Network Unreachable
+
+**Error message:**
+```
+OSError: [Errno 101] Network is unreachable
+requests.exceptions.ConnectionError: Could not reach host. Are you offline?
+```
+
+**What this means:**
+The container cannot access the internet at runtime. This prevents:
+- ChromeDriver downloads (if not pre-installed)
+- API calls to external services
+- Any network operations
+
+**Solution:**
+✅ **Fixed in latest version!** ChromeDriver is now installed during Docker build (which has internet access), so no runtime network is needed for startup.
+
+**If you still see network errors:**
+1. Check Dokploy networking configuration
+2. Verify Docker network mode in docker-compose.yml
+3. Test: `docker exec <container> ping 8.8.8.8`
+
+---
+
 ## Error: Docker Registry Connection Timeout
 
 **Error message:**

@@ -69,8 +69,23 @@ def get_driver():
         options.add_experimental_option("detach", True)
         print("[*] Running in GUI mode")
 
-    print("[*] Downloading/verifying ChromeDriver...")
-    driver_service = Service(ChromeDriverManager().install())
+    # Check if ChromeDriver is pre-installed (Docker environment)
+    chromedriver_path = os.getenv("CHROMEDRIVER_PATH", "/usr/local/bin/chromedriver")
+
+    if os.path.exists(chromedriver_path):
+        print(f"[*] Using pre-installed ChromeDriver at {chromedriver_path}")
+        driver_service = Service(chromedriver_path)
+    else:
+        # Fallback to ChromeDriverManager for local development
+        print("[*] Downloading/verifying ChromeDriver...")
+        try:
+            driver_service = Service(ChromeDriverManager().install())
+        except Exception as e:
+            print(f"[!] Failed to download ChromeDriver: {e}")
+            print("[!] If running in Docker, ensure ChromeDriver is installed in the image")
+            print("[!] If network is unavailable, ChromeDriver must be pre-installed")
+            raise
+
     driver = webdriver.Chrome(service=driver_service, options=options)
     return driver
 
