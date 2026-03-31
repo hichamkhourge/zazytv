@@ -29,6 +29,11 @@ services:
       - IBOPLAYER_PLAYLIST_NAME=${IBOPLAYER_PLAYLIST_NAME:-Zazy}
       - IBOPLAYER_PLAYLIST_URL=${IBOPLAYER_PLAYLIST_URL:-http://live.zazytv.com}
 
+      # Telegram Notifications
+      - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-False}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+
       # Timezone for cron
       - TZ=${TZ:-UTC}
 
