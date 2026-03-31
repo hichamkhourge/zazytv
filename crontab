@@ -6,7 +6,7 @@
 # to match your desired timezone
 
 # Run automation at 3:00 AM daily
-*/5 * * * * cd /app && /usr/local/bin/python /app/zazy_playlist_automation.py >> /var/log/cron.log 2>&1
+0 3 * * * cd /app && /usr/local/bin/python /app/zazy_playlist_automation.py >> /var/log/cron.log 2>&1
 
 # Keep cron happy with a newline at the end
 
