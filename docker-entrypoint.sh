@@ -6,17 +6,10 @@ echo "  Zazy TV Automation - Docker Container"
 echo "================================================"
 echo ""
 
-# Load environment variables from .env if it exists
-if [ -f "/app/.env" ]; then
-    echo "[*] Loading environment variables from .env file..."
-    export $(cat /app/.env | grep -v '^#' | xargs)
-else
-    echo "[!] Warning: .env file not found at /app/.env"
-    echo "[*] Using environment variables from docker-compose.yml"
-fi
+# Note: Environment variables are loaded by docker-compose.yml from .env file
+# No manual parsing needed - docker-compose handles this automatically
 
 # Display configuration (without sensitive data)
-echo ""
 echo "Configuration:"
 echo "  - Base URL: ${BASE_URL:-Not set}"
 echo "  - Home URL: ${HOME_URL:-Not set}"
