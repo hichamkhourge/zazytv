@@ -287,11 +287,31 @@ def fill_checkout_form(driver):
     print("[*] Filling registration form...")
     rnd = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
 
-    # Generic user data
+    # Realistic email domains
+    email_domains = [
+        "gmail.com",
+        "outlook.com",
+        "yahoo.com",
+        "hotmail.com",
+        "icloud.com",
+        "protonmail.com",
+        "mail.com",
+        "aol.com"
+    ]
+
+    # Random first and last names for more realistic emails
+    first_names = ["john", "james", "michael", "robert", "david", "william", "richard", "joseph", "thomas", "chris"]
+    last_names = ["smith", "johnson", "williams", "brown", "jones", "miller", "davis", "garcia", "rodriguez", "wilson"]
+
+    random_first = random.choice(first_names)
+    random_last = random.choice(last_names)
+    random_domain = random.choice(email_domains)
+
+    # Generic user data with realistic email
     form_data = {
-        "firstname": "John",
-        "lastname": "Doe",
-        "email": f"johndoe{rnd}@example.com",
+        "firstname": random_first.capitalize(),
+        "lastname": random_last.capitalize(),
+        "email": f"{random_first}.{random_last}{rnd}@{random_domain}",
         "phonenumber": "2125551234",
         "address1": "123 Main St",
         "city": "New York",
