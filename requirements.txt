@@ -1,0 +1,52 @@
+# ═══════════════════════════════════════════════════════════
+# Zazy TV Automation - Dependencies
+# ═══════════════════════════════════════════════════════════
+
+# Core automation dependencies
+selenium==4.41.0
+webdriver-manager==4.0.2
+undetected-chromedriver==3.5.5
+
+# 2captcha for automatic reCAPTCHA solving
+2captcha-python==2.0.5
+
+# Environment configuration
+python-dotenv==1.2.2
+
+# HTTP and async libraries
+requests==2.32.5
+httpx==0.28.1
+httpcore==1.0.9
+aiofiles==25.1.0
+anyio==4.12.1
+
+# Web scraping utilities
+beautifulsoup4==4.14.3
+soupsieve==2.8.3
+fake-useragent==2.2.0
+
+# WebSocket support
+websockets==16.0
+websocket-client==1.9.0
+trio-websocket==0.12.2
+wsproto==1.3.2
+
+# Async framework
+trio==0.33.0
+outcome==1.3.0.post0
+sniffio==1.3.1
+sortedcontainers==2.4.0
+
+# Networking and encoding
+urllib3==2.6.3
+certifi==2026.2.25
+charset-normalizer==3.4.6
+idna==3.11
+h11==0.16.0
+PySocks==1.7.1
+
+# Utilities
+attrs==25.4.0
+typing_extensions==4.15.0
+packaging==26.0
+setuptools==82.0.1
