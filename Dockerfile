@@ -49,6 +49,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY zazy_playlist_automation.py .
+COPY telegram_notifier.py .
 COPY .env.example .
 
 # Create necessary directories

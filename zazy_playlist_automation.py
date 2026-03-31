@@ -31,8 +31,20 @@ from webdriver_manager.chrome import ChromeDriverManager
 # Load environment variables from .env file
 load_dotenv()
 
-# Import Telegram notifier
-from telegram_notifier import notifier
+# Import Telegram notifier (optional - gracefully handle if not available)
+try:
+    from telegram_notifier import notifier
+    TELEGRAM_AVAILABLE = True
+except ImportError:
+    print("[!] Warning: telegram_notifier module not found. Telegram notifications will be disabled.")
+    TELEGRAM_AVAILABLE = False
+    # Create a dummy notifier object
+    class DummyNotifier:
+        def notify_success(self, *args, **kwargs):
+            return False
+        def notify_error(self, *args, **kwargs):
+            return False
+    notifier = DummyNotifier()
 
 # Configuration from environment variables
 TWOCAPTCHA_API_KEY = os.getenv("TWOCAPTCHA_API_KEY")
