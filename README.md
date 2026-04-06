@@ -1,15 +1,27 @@
-# Zazy TV Automation
+# Zazy Automation Suite
 
-Automated playlist creation and IBO Player integration for Zazy TV. This tool automates the entire process of signing up for a Zazy TV free trial, extracting credentials, saving the playlist to IBO Player, and downloading the M3U file.
+Automated playlist creation and service activation for Zazy TV and UGEEN.LIVE. This suite includes two automation tools:
+- **Zazy Playlist Automation**: Automates Zazy TV account creation, credential extraction, and IBO Player integration
+- **UGEEN API Scraper**: Automates UGEEN.LIVE service activation with anti-detection and session management
 
 ## Features
 
+### Zazy Playlist Automation
 - **Automated Account Creation**: Creates Zazy TV account with auto-generated strong passwords
 - **reCAPTCHA Solving**: Automatically solves reCAPTCHA v2 using 2captcha service
 - **Credential Extraction**: Automatically extracts M3U URL, username, and password from service page
 - **IBO Player Integration**: Saves playlist to IBO Player via API
 - **M3U Download**: Downloads playlist file to local `playlists/` directory with timestamp
 - **Browser Automation**: Uses Selenium with Chrome for reliable browser-based automation
+
+### UGEEN API Scraper
+- **Stealth Browser Automation**: Uses undetected-chromedriver for anti-detection
+- **Session Management**: Saves and reuses JWT tokens for efficiency
+- **Human Behavior Simulation**: Random delays, mouse movements, and scrolling
+- **2captcha Integration**: Automatic reCAPTCHA solving when needed
+- **Data Persistence**: Saves activation codes and session data
+- **Telegram Notifications**: Real-time status updates (optional)
+- **Configurable Scheduling**: Runs automatically via cron
 
 ## Prerequisites
 
@@ -49,6 +61,7 @@ Edit the `.env` file with your credentials:
 
 ### Required Configuration
 
+#### For Zazy Playlist Automation:
 - **TWOCAPTCHA_API_KEY**: Your 2captcha API key
   - Get from: https://2captcha.com/enterpage
 
@@ -62,12 +75,32 @@ Edit the `.env` file with your credentials:
 - **IBOPLAYER_PLAYLIST_URL_ID**: Your IBO Player device playlist ID
   - Find in your IBO Player device settings
 
+#### For UGEEN API Scraper:
+- **UGEEN_EMAIL**: Your UGEEN.LIVE login email
+- **UGEEN_PASSWORD**: Your UGEEN.LIVE password
+- **UGEEN_PACKAGE_ID**: Package ID to activate (default: 384)
+- **TWOCAPTCHA_API_KEY**: Same 2captcha API key used for Zazy
+
 ### Optional Configuration
 
+#### Zazy-specific:
 - **PROMO_CODE**: Promotional code (if available)
 - **LOGIN_EMAIL/LOGIN_PASSWORD**: For existing account login (set SKIP_LOGIN=False)
 
+#### UGEEN-specific:
+- **UGEEN_URL**: UGEEN base URL (default: http://ugeen.live)
+- **UGEEN_HEADLESS**: Run in headless mode (default: True)
+- **UGEEN_SESSION_DIR**: Session storage directory (default: ./ugeen_sessions)
+- **UGEEN_DATA_DIR**: Data output directory (default: ./ugeen_data)
+
+#### Shared Settings:
+- **TELEGRAM_ENABLED**: Enable Telegram notifications (default: False)
+- **TELEGRAM_BOT_TOKEN**: Your Telegram bot token
+- **TELEGRAM_CHAT_ID**: Your Telegram chat ID
+
 ## Usage
+
+### Running Zazy Playlist Automation
 
 1. **Activate virtual environment**
    ```bash
@@ -88,11 +121,35 @@ Edit the `.env` file with your credentials:
    - Navigates to service details and extracts credentials
    - Saves playlist to IBO Player
    - Downloads M3U file to `playlists/` directory
-   - Browser remains open for verification
 
 4. **Check your files**
    - M3U playlist: `playlists/zazy_playlist_YYYY-MM-DD_HHMMSS.m3u`
    - Credentials: Displayed in terminal output
+
+### Running UGEEN API Scraper
+
+1. **Activate virtual environment**
+   ```bash
+   source venv/bin/activate
+   ```
+
+2. **Run the scraper**
+   ```bash
+   python ugeen_api_scraper.py
+   ```
+
+3. **What happens:**
+   - Checks for existing valid session (reuses if available)
+   - Logs in with stealth browser using your credentials
+   - Navigates to renewal page and requests activation code
+   - Decodes JWT token to extract activation code
+   - Submits subscription form with the code
+   - Saves activation data to `ugeen_data/` directory
+   - Sends Telegram notification (if enabled)
+
+4. **Check your files**
+   - Activation data: `ugeen_data/activation_YYYY-MM-DD_HHMMSS.json`
+   - Session cache: `ugeen_sessions/ugeen_session.json`
 
 ## Docker Deployment
 
@@ -129,7 +186,23 @@ Edit the `.env` file with your credentials:
 
 5. **Manual run (trigger immediately)**
    ```bash
+   # Run Zazy automation
    docker exec zazy-automation python /app/zazy_playlist_automation.py
+
+   # Run UGEEN scraper
+   docker exec zazy-automation python /app/ugeen_api_scraper.py
+   ```
+
+6. **Access UGEEN data**
+   ```bash
+   # View activation history
+   docker exec zazy-automation ls -lh /app/ugeen_data
+
+   # Copy activation data
+   docker cp zazy-automation:/app/ugeen_data ./ugeen_data
+
+   # View specific activation
+   docker exec zazy-automation cat /app/ugeen_data/activation_2026-04-06_060000.json
    ```
 
 ### Option 2: Dokploy Deployment
@@ -142,28 +215,51 @@ Edit the `.env` file with your credentials:
 
 2. **Environment Variables to set:**
    ```
+   # 2captcha (required for both)
    TWOCAPTCHA_API_KEY=your_key_here
+
+   # Zazy-specific
    IBOPLAYER_COOKIE=your_cookie_here
    IBOPLAYER_PLAYLIST_URL_ID=your_id_here
    IBOPLAYER_PLAYLIST_NAME=Zazy
+
+   # UGEEN-specific
+   UGEEN_EMAIL=your_email@example.com
+   UGEEN_PASSWORD=your_password
+   UGEEN_PACKAGE_ID=384
+
+   # Telegram (optional)
+   TELEGRAM_ENABLED=True
+   TELEGRAM_BOT_TOKEN=your_bot_token
+   TELEGRAM_CHAT_ID=your_chat_id
+
+   # General
    TZ=America/New_York  # Your timezone
    ```
 
 3. **Deploy:**
    - Click "Deploy" button
    - Monitor logs for first run
-   - Automation will run daily at 03:00 AM (based on TZ setting)
+   - Zazy automation will run daily at 03:00 AM
+   - UGEEN scraper will run daily at 06:00 AM
+   - (Times based on TZ setting)
 
 ### Scheduled Execution
 
-The Docker container runs the automation **daily at 03:00 AM** (based on the `TZ` environment variable).
+The Docker container runs both automations on a daily schedule (based on the `TZ` environment variable):
+- **Zazy Playlist Automation**: Daily at 03:00 AM
+- **UGEEN API Scraper**: Daily at 06:00 AM
 
 **Change the schedule:**
 Edit the `crontab` file before building:
 ```bash
-# Current: 0 3 * * * (03:00 AM daily)
-# Example: 0 */6 * * * (every 6 hours)
-# Example: 0 0 * * 1 (every Monday at midnight)
+# Zazy: 0 3 * * * (03:00 AM daily)
+# UGEEN: 0 6 * * * (06:00 AM daily)
+
+# Example alternatives:
+# 0 */6 * * * (every 6 hours)
+# 0 0 * * 1 (every Monday at midnight)
+# 0 12,18 * * * (twice daily at noon and 6 PM)
 ```
 
 **Timezone Configuration:**
@@ -231,58 +327,112 @@ docker-compose down -v
 
 ```
 zazytv/
-├── zazy_playlist_automation.py  # Main automation script
+├── zazy_playlist_automation.py  # Zazy automation script
+├── ugeen_api_scraper.py         # UGEEN scraper script
+├── telegram_notifier.py         # Telegram notification module
 ├── requirements.txt             # Python dependencies
 ├── Dockerfile                   # Docker image configuration
 ├── docker-compose.yml           # Docker Compose orchestration
 ├── docker-entrypoint.sh         # Container startup script
-├── crontab                      # Cron schedule configuration
+├── crontab                      # Cron schedule (both scripts)
 ├── .env                         # Configuration (not in git)
 ├── .env.example                 # Configuration template
 ├── .gitignore                   # Git ignore rules
 ├── .dockerignore                # Docker build ignore rules
-├── playlists/                   # Downloaded M3U files (not in git)
+├── playlists/                   # Zazy M3U files (not in git)
+├── ugeen_sessions/              # UGEEN session cache (not in git)
+├── ugeen_data/                  # UGEEN activation data (not in git)
 └── README.md                    # This file
 ```
 
 ## Troubleshooting
 
-### reCAPTCHA Fails
+### Common Issues
+
+#### reCAPTCHA Fails
 - Check your 2captcha balance at https://2captcha.com
 - Ensure TWOCAPTCHA_API_KEY is correct in .env
+- Both scripts share the same 2captcha account
 
-### IBO Player Save Fails
+#### Zazy-Specific Issues
+
+**IBO Player Save Fails:**
 - Verify IBOPLAYER_COOKIE is current (cookies expire)
 - Check IBOPLAYER_PLAYLIST_URL_ID matches your device
 
-### M3U Download Fails
+**M3U Download Fails:**
 - Verify credentials were extracted correctly
 - Check IBOPLAYER_PLAYLIST_URL is accessible
 
-### Chrome Driver Issues
+#### UGEEN-Specific Issues
+
+**Login Fails Repeatedly:**
+- Verify UGEEN_EMAIL and UGEEN_PASSWORD are correct
+- Check if account is locked or requires verification
+- Try running in non-headless mode locally: `UGEEN_HEADLESS=False python ugeen_api_scraper.py`
+
+**Session Not Reused:**
+- Check if `ugeen_sessions/` directory exists and is writable
+- Session expires after 24 hours (this is normal)
+- Old sessions are automatically cleaned up
+
+**Activation Fails:**
+- Verify UGEEN_PACKAGE_ID is correct (default: 384)
+- Check logs for specific error messages
+- Ensure account has available activations
+
+#### Chrome Driver Issues
 ```bash
-# The script auto-downloads ChromeDriver, but if issues occur:
-pip install --upgrade webdriver-manager
+# The scripts auto-manage ChromeDriver, but if issues occur:
+pip install --upgrade webdriver-manager undetected-chromedriver
+```
+
+#### Docker Issues
+
+**Container won't start:**
+```bash
+# Check logs
+docker logs zazy-automation
+
+# Rebuild container
+docker-compose up -d --build
+```
+
+**Cron not running:**
+```bash
+# Verify cron is running
+docker exec zazy-automation ps aux | grep cron
+
+# Check cron logs
+docker exec zazy-automation cat /var/log/cron.log
 ```
 
 ## Security Notes
 
-- **Never commit `.env` file** - Contains sensitive API keys and cookies
+- **Never commit `.env` file** - Contains sensitive credentials
 - **Never share your 2captcha API key** - It's linked to your billing
 - **IBO Player cookies expire** - Update regularly in .env
 - **Downloaded M3U files** contain credentials - Keep them secure
+- **UGEEN credentials** - Stored in environment variables, never hardcoded
+- **Session files** (`ugeen_sessions/`) contain JWT tokens - Keep them secure
+- **Activation data** (`ugeen_data/`) may contain sensitive information - Protect accordingly
 
 ## Dependencies
 
-- `selenium` - Browser automation
+- `selenium` - Browser automation (Zazy)
+- `undetected-chromedriver` - Stealth browser automation (UGEEN)
 - `webdriver-manager` - Chrome driver management
 - `2captcha-python` - CAPTCHA solving service
 - `python-dotenv` - Environment variable management
 - `requests` - HTTP requests for API calls
+- `beautifulsoup4` - HTML parsing
+- `fake-useragent` - User agent spoofing
+
+See `requirements.txt` for complete list with versions.
 
 ## License
 
-This project is for educational purposes only. Use responsibly and in accordance with Zazy TV's terms of service.
+This project is for educational purposes only. Use responsibly and in accordance with the terms of service of Zazy TV and UGEEN.LIVE.
 
 ## Contributing
 
@@ -295,6 +445,15 @@ For issues and questions:
 - Check existing issues for solutions
 
 ## Changelog
+
+### v2.0.0 (2026-04-06)
+- **NEW**: Added UGEEN API Scraper automation
+- **NEW**: Telegram notification support for both scripts
+- **NEW**: Session management and caching for UGEEN
+- **NEW**: Combined Docker container for both automations
+- **IMPROVED**: Better error handling and logging
+- **IMPROVED**: Configurable schedules (Zazy: 3 AM, UGEEN: 6 AM)
+- **IMPROVED**: Environment-based configuration for all credentials
 
 ### v1.0.0
 - Initial release
