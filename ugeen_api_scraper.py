@@ -788,7 +788,7 @@ def scrape_with_api_auth(proxy=None):
         'username': UGEEN_EMAIL,
         'password': UGEEN_PASSWORD,
         'package_id': UGEEN_PACKAGE_ID,
-        'api_base': f'{UGEEN_URL}/api/v1'
+        'api_base': UGEEN_URL  # Base URL without /api/v1 - endpoints are like /auth/login
     }
 
     print('\n' + '='*60)
