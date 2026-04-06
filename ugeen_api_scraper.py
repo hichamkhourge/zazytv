@@ -190,8 +190,18 @@ def get_recaptcha_sitekey(driver):
         print(f"Error extracting sitekey: {e}")
         return None
 
-def solve_recaptcha_with_2captcha(driver, page_url):
-    """Solve reCAPTCHA using 2captcha service"""
+def solve_recaptcha_with_2captcha(driver, page_url, use_api_login=True):
+    """
+    Solve reCAPTCHA using 2captcha service
+
+    Args:
+        driver: Selenium WebDriver instance
+        page_url: Current page URL
+        use_api_login: If True, attempt API login after solving captcha (more reliable for headless)
+
+    Returns:
+        tuple: (success: bool, jwt_token: str or None)
+    """
     try:
         print("🔧 Attempting to solve reCAPTCHA with 2captcha...")
 
@@ -199,7 +209,7 @@ def solve_recaptcha_with_2captcha(driver, page_url):
         sitekey = get_recaptcha_sitekey(driver)
         if not sitekey:
             print("✗ Could not find reCAPTCHA sitekey")
-            return False
+            return (False, None)
 
         print(f"✓ Found reCAPTCHA sitekey: {sitekey}")
 
@@ -219,7 +229,7 @@ def solve_recaptcha_with_2captcha(driver, page_url):
 
         if result.get('status') != 1:
             print(f"✗ 2captcha submission failed: {result.get('request', 'Unknown error')}")
-            return False
+            return (False, None)
 
         captcha_id = result.get('request')
         print(f"✓ Captcha submitted. ID: {captcha_id}")
@@ -247,7 +257,24 @@ def solve_recaptcha_with_2captcha(driver, page_url):
                 captcha_solution = result.get('request')
                 print(f"✓ reCAPTCHA solved! (took {(attempt + 1) * 5} seconds)")
 
-                # Inject the solution into the page
+                # Try API login first (more reliable for headless/Docker environments)
+                jwt_token = None
+                if use_api_login:
+                    print("\n🔑 Attempting API-based login (reliable for headless mode)...")
+                    jwt_token = perform_api_login(
+                        UGEEN_EMAIL,
+                        UGEEN_PASSWORD,
+                        captcha_solution,
+                        UGEEN_URL
+                    )
+
+                    if jwt_token:
+                        print("✓ API login successful! Returning JWT token.")
+                        return (True, jwt_token)
+                    else:
+                        print("⚠️ API login failed, falling back to browser automation...")
+
+                # Fallback: Inject the solution into the page (traditional browser automation)
                 print("Injecting solution into page...")
                 driver.execute_script(f"""
                     // Set the response in the textarea
@@ -306,23 +333,23 @@ def solve_recaptcha_with_2captcha(driver, page_url):
                     print(f"Note: Could not resubmit form: {e}")
 
                 time.sleep(5)
-                return True
+                return (True, None)  # Success but no JWT token yet (will be extracted later)
 
             elif result.get('request') == 'CAPCHA_NOT_READY':
                 print(f"  Waiting for solution... ({attempt + 1}/{max_attempts})")
                 continue
             else:
                 print(f"✗ 2captcha error: {result.get('request', 'Unknown error')}")
-                return False
+                return (False, None)
 
         print("✗ Timeout waiting for captcha solution")
-        return False
+        return (False, None)
 
     except Exception as e:
         print(f"✗ Error solving reCAPTCHA: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        return (False, None)
 
 def save_session(cookies, jwt_token):
     """Save cookies and JWT token for session reuse"""
@@ -378,12 +405,21 @@ def perform_api_login(email, password, recaptcha_solution, api_base):
     """
     Perform direct API login - bypasses browser automation issues
     This is more reliable than browser automation, especially in Docker/headless mode
+
+    Tries multiple possible API endpoints to find the correct one.
     """
     try:
         log_message("Attempting direct API login...", "INFO")
 
-        # Prepare the login request
-        login_url = f"{api_base}/auth/login"
+        # Try multiple possible API endpoints
+        possible_endpoints = [
+            "/auth/login",           # Most common REST pattern
+            "/api/auth/login",       # With /api prefix
+            "/api/v1/auth/login",    # With versioning
+            "/api/login",            # Simpler path
+            "/login",                # Direct login
+            "/signin",               # Alternative naming
+        ]
 
         # Match the browser's request format exactly
         payload = {
@@ -399,65 +435,82 @@ def perform_api_login(email, password, recaptcha_solution, api_base):
             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
             'Host': UGEEN_URL.replace('http://', '').replace('https://', ''),
             'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
-            'X-Requested-With': 'XMLHttpRequest'
+            'X-Requested-With': 'XMLHttpRequest',
+            'Origin': api_base,
+            'Referer': f"{api_base}/signin.html"
         }
 
-        log_message(f"POST {login_url}", "INFO")
+        # Try each endpoint
+        for endpoint in possible_endpoints:
+            login_url = f"{api_base}{endpoint}"
+            log_message(f"Trying POST {login_url}", "INFO")
 
-        # Make the API request
-        response = requests.post(
-            login_url,
-            data=payload,  # Use data instead of json to match jQuery ajax behavior
-            headers=headers,
-            timeout=30
-        )
-
-        log_message(f"API Response Status: {response.status_code}", "INFO")
-
-        if response.status_code == 200:
             try:
-                data = response.json()
+                # Make the API request
+                response = requests.post(
+                    login_url,
+                    data=payload,  # Use data instead of json to match jQuery ajax behavior
+                    headers=headers,
+                    timeout=10
+                )
 
-                # Extract JWT token from response
-                # Based on signin.js: localStorage.jsonwebToken = response.access.token
-                jwt_token = data.get('access', {}).get('token')
+                log_message(f"API Response Status: {response.status_code}", "INFO")
 
-                if jwt_token:
-                    log_message("✓ JWT token extracted from API response!", "SUCCESS")
+                # If we get 200, process the response
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
 
-                    # Also extract other user data if needed
-                    user_email = data.get('user', {}).get('email')
-                    username = data.get('user', {}).get('username')
+                        # Extract JWT token from response
+                        # Based on signin.js: localStorage.jsonwebToken = response.access.token
+                        jwt_token = data.get('access', {}).get('token')
 
-                    if user_email:
-                        log_message(f"Logged in as: {user_email} ({username})", "INFO")
+                        if jwt_token:
+                            log_message(f"✓ JWT token extracted from API response (endpoint: {endpoint})!", "SUCCESS")
 
-                    return jwt_token
+                            # Also extract other user data if needed
+                            user_email = data.get('user', {}).get('email')
+                            username = data.get('user', {}).get('username')
+
+                            if user_email:
+                                log_message(f"Logged in as: {user_email} ({username})", "INFO")
+
+                            return jwt_token
+                        else:
+                            log_message(f"✗ No JWT token in API response from {endpoint}", "WARNING")
+                            continue  # Try next endpoint
+
+                    except json.JSONDecodeError as e:
+                        log_message(f"✗ Failed to parse API response as JSON from {endpoint}: {e}", "WARNING")
+                        continue  # Try next endpoint
+
+                # If we get 404, silently try next endpoint
+                elif response.status_code == 404:
+                    log_message(f"Endpoint {endpoint} not found (404), trying next...", "DEBUG")
+                    continue
+
+                # For other errors, log and continue
                 else:
-                    log_message("✗ No JWT token in API response", "ERROR")
-                    log_message(f"Response data: {json.dumps(data, indent=2)}", "DEBUG")
-                    return None
+                    log_message(f"✗ Endpoint {endpoint} returned status {response.status_code}", "WARNING")
+                    try:
+                        error_data = response.json()
+                        error_msg = error_data.get('message', 'Unknown error')
+                        log_message(f"Error message: {error_msg}", "WARNING")
+                    except:
+                        pass
+                    continue  # Try next endpoint
 
-            except json.JSONDecodeError as e:
-                log_message(f"✗ Failed to parse API response as JSON: {e}", "ERROR")
-                log_message(f"Response text: {response.text[:500]}", "DEBUG")
-                return None
-        else:
-            log_message(f"✗ API login failed with status {response.status_code}", "ERROR")
-            try:
-                error_data = response.json()
-                error_msg = error_data.get('message', 'Unknown error')
-                log_message(f"Error message: {error_msg}", "ERROR")
-            except:
-                log_message(f"Response text: {response.text[:200]}", "ERROR")
-            return None
+            except requests.exceptions.Timeout:
+                log_message(f"✗ Request to {endpoint} timed out", "WARNING")
+                continue
+            except requests.exceptions.RequestException as e:
+                log_message(f"✗ Request to {endpoint} failed: {e}", "WARNING")
+                continue
 
-    except requests.exceptions.Timeout:
-        log_message("✗ API request timed out", "ERROR")
+        # If we've tried all endpoints and none worked
+        log_message("✗ All API endpoints failed. Falling back to browser automation.", "INFO")
         return None
-    except requests.exceptions.RequestException as e:
-        log_message(f"✗ API request failed: {e}", "ERROR")
-        return None
+
     except Exception as e:
         log_message(f"✗ Unexpected error in API login: {e}", "ERROR")
         traceback.print_exc()
@@ -611,12 +664,17 @@ def perform_login_with_retries(driver, wait, config, retry_count=0):
 
         # Check for reCAPTCHA before clicking (only block if actually visible)
         print("Checking for reCAPTCHA...")
+        jwt_token = None
         if detect_recaptcha(driver):
             print("⚠️ reCAPTCHA challenge is BLOCKING the page!")
 
             # Try to solve with 2captcha
-            if solve_recaptcha_with_2captcha(driver, config['url']):
+            success, jwt_token = solve_recaptcha_with_2captcha(driver, config['url'])
+            if success:
                 print("✓ reCAPTCHA solved successfully with 2captcha!")
+                if jwt_token:
+                    print("✓ JWT token obtained via API login!")
+                    return jwt_token  # Success! Return the token directly
                 random_delay(2, 3)
             else:
                 print("⚠️ 2captcha solving failed, waiting 30 seconds...")
@@ -646,89 +704,25 @@ def perform_login_with_retries(driver, wait, config, retry_count=0):
         print('Waiting for authentication...')
         time.sleep(5)
 
-        recaptcha_solution = None
-
-        if detect_recaptcha(driver):
+        # Check if reCAPTCHA appeared after login click
+        if not jwt_token and detect_recaptcha(driver):
             print("⚠️ reCAPTCHA appeared AFTER login click!")
 
-            # Get the reCAPTCHA sitekey
-            sitekey = get_recaptcha_sitekey(driver)
-            if not sitekey:
-                print("✗ Could not find reCAPTCHA sitekey")
-                return None
+            # Use the unified reCAPTCHA solving function (includes API login attempt)
+            success, jwt_token_from_captcha = solve_recaptcha_with_2captcha(driver, driver.current_url)
 
-            print(f"✓ Found reCAPTCHA sitekey: {sitekey}")
-
-            # Solve using 2captcha
-            print("Solving reCAPTCHA with 2captcha...")
-            submit_url = "http://2captcha.com/in.php"
-            submit_params = {
-                'key': TWOCAPTCHA_API_KEY,
-                'method': 'userrecaptcha',
-                'googlekey': sitekey,
-                'pageurl': driver.current_url,
-                'json': 1
-            }
-
-            response = requests.get(submit_url, params=submit_params, timeout=30)
-            result = response.json()
-
-            if result.get('status') != 1:
-                print(f"✗ 2captcha submission failed: {result.get('request', 'Unknown error')}")
-                return None
-
-            captcha_id = result.get('request')
-            print(f"✓ Captcha submitted. ID: {captcha_id}")
-            print("Waiting for solution (this may take 30-60 seconds)...")
-
-            # Poll for solution
-            result_url = "http://2captcha.com/res.php"
-            max_attempts = 30
-
-            for attempt in range(max_attempts):
-                time.sleep(5)
-
-                result_params = {
-                    'key': TWOCAPTCHA_API_KEY,
-                    'action': 'get',
-                    'id': captcha_id,
-                    'json': 1
-                }
-
-                response = requests.get(result_url, params=result_params, timeout=30)
-                result = response.json()
-
-                if result.get('status') == 1:
-                    recaptcha_solution = result.get('request')
-                    print(f"✓ reCAPTCHA solved! (took {(attempt + 1) * 5} seconds)")
-                    break
-                elif result.get('request') == 'CAPCHA_NOT_READY':
-                    print(f"  Waiting for solution... ({attempt + 1}/{max_attempts})")
-                    continue
-                else:
-                    print(f"✗ 2captcha error: {result.get('request', 'Unknown error')}")
-                    return None
-
-        # Now try API-based login with the reCAPTCHA solution
-        jwt_token = None
-
-        if recaptcha_solution:
-            print("\n🔑 Using API-based login (more reliable than browser automation)")
-            jwt_token = perform_api_login(
-                config['username'],
-                config['password'],
-                recaptcha_solution,
-                config['api_base']
-            )
-
-            if jwt_token:
-                print("✓ API login successful!")
+            if success and jwt_token_from_captcha:
+                print("✓ JWT token obtained via API login after solving reCAPTCHA!")
+                jwt_token = jwt_token_from_captcha
+            elif success:
+                print("✓ reCAPTCHA solved, but no JWT from API. Will check localStorage...")
             else:
-                print("✗ API login failed, falling back to browser method...")
+                print("✗ Failed to solve reCAPTCHA")
+                return None
 
-        # Fallback: Try to extract JWT token from localStorage (browser automation method)
+        # If we still don't have JWT token, try to extract from localStorage (browser automation method)
         if not jwt_token:
-            print('Extracting JWT token from localStorage (fallback method)...')
+            print('Extracting JWT token from localStorage...')
 
             # Poll for up to 30 seconds
             for i in range(15):
