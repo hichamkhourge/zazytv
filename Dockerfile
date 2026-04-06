@@ -49,11 +49,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY zazy_playlist_automation.py .
+COPY ugeen_api_scraper.py .
 COPY telegram_notifier.py .
 COPY .env.example .
 
 # Create necessary directories
-RUN mkdir -p /app/playlists /var/log
+RUN mkdir -p /app/playlists /app/ugeen_sessions /app/ugeen_data /var/log
 
 # Copy crontab file
 COPY crontab /etc/cron.d/zazy-cron
@@ -71,8 +72,8 @@ RUN touch /var/log/cron.log
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Volume for playlists
-VOLUME ["/app/playlists"]
+# Volumes for data persistence
+VOLUME ["/app/playlists", "/app/ugeen_sessions", "/app/ugeen_data"]
 
 # Run the entrypoint script
 ENTRYPOINT ["docker-entrypoint.sh"]

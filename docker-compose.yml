@@ -34,12 +34,25 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
 
+      # UGEEN Scraper Configuration
+      - UGEEN_EMAIL=${UGEEN_EMAIL}
+      - UGEEN_PASSWORD=${UGEEN_PASSWORD}
+      - UGEEN_URL=${UGEEN_URL:-http://ugeen.live}
+      - UGEEN_PACKAGE_ID=${UGEEN_PACKAGE_ID:-384}
+      - UGEEN_HEADLESS=${UGEEN_HEADLESS:-True}
+      - UGEEN_SESSION_DIR=${UGEEN_SESSION_DIR:-./ugeen_sessions}
+      - UGEEN_DATA_DIR=${UGEEN_DATA_DIR:-./ugeen_data}
+
       # Timezone for cron
       - TZ=${TZ:-UTC}
 
     volumes:
       # Persistent storage for playlists
       - zazy-playlists:/app/playlists
+
+      # UGEEN data directories
+      - ugeen-sessions:/app/ugeen_sessions
+      - ugeen-data:/app/ugeen_data
 
       # Mount .env file (alternative to env_file)
       - ./.env:/app/.env:ro
@@ -60,6 +73,10 @@ services:
 
 volumes:
   zazy-playlists:
+    driver: local
+  ugeen-sessions:
+    driver: local
+  ugeen-data:
     driver: local
   zazy-logs:
     driver: local
