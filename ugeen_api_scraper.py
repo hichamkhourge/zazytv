@@ -374,6 +374,95 @@ def verify_session(jwt_token, api_base):
     except:
         return False
 
+def perform_api_login(email, password, recaptcha_solution, api_base):
+    """
+    Perform direct API login - bypasses browser automation issues
+    This is more reliable than browser automation, especially in Docker/headless mode
+    """
+    try:
+        log_message("Attempting direct API login...", "INFO")
+
+        # Prepare the login request
+        login_url = f"{api_base}/auth/login"
+
+        # Match the browser's request format exactly
+        payload = {
+            'email': email,
+            'password': password,
+            'recaptcha': recaptcha_solution
+        }
+
+        headers = {
+            'Accept': 'application/json',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'Host': UGEEN_URL.replace('http://', '').replace('https://', ''),
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+
+        log_message(f"POST {login_url}", "INFO")
+
+        # Make the API request
+        response = requests.post(
+            login_url,
+            data=payload,  # Use data instead of json to match jQuery ajax behavior
+            headers=headers,
+            timeout=30
+        )
+
+        log_message(f"API Response Status: {response.status_code}", "INFO")
+
+        if response.status_code == 200:
+            try:
+                data = response.json()
+
+                # Extract JWT token from response
+                # Based on signin.js: localStorage.jsonwebToken = response.access.token
+                jwt_token = data.get('access', {}).get('token')
+
+                if jwt_token:
+                    log_message("✓ JWT token extracted from API response!", "SUCCESS")
+
+                    # Also extract other user data if needed
+                    user_email = data.get('user', {}).get('email')
+                    username = data.get('user', {}).get('username')
+
+                    if user_email:
+                        log_message(f"Logged in as: {user_email} ({username})", "INFO")
+
+                    return jwt_token
+                else:
+                    log_message("✗ No JWT token in API response", "ERROR")
+                    log_message(f"Response data: {json.dumps(data, indent=2)}", "DEBUG")
+                    return None
+
+            except json.JSONDecodeError as e:
+                log_message(f"✗ Failed to parse API response as JSON: {e}", "ERROR")
+                log_message(f"Response text: {response.text[:500]}", "DEBUG")
+                return None
+        else:
+            log_message(f"✗ API login failed with status {response.status_code}", "ERROR")
+            try:
+                error_data = response.json()
+                error_msg = error_data.get('message', 'Unknown error')
+                log_message(f"Error message: {error_msg}", "ERROR")
+            except:
+                log_message(f"Response text: {response.text[:200]}", "ERROR")
+            return None
+
+    except requests.exceptions.Timeout:
+        log_message("✗ API request timed out", "ERROR")
+        return None
+    except requests.exceptions.RequestException as e:
+        log_message(f"✗ API request failed: {e}", "ERROR")
+        return None
+    except Exception as e:
+        log_message(f"✗ Unexpected error in API login: {e}", "ERROR")
+        traceback.print_exc()
+        return None
+
 def create_stealth_driver(proxy=None, headless=None):
     """Create undetected Chrome driver with stealth options"""
     # Use global setting if not specified
@@ -557,43 +646,101 @@ def perform_login_with_retries(driver, wait, config, retry_count=0):
         print('Waiting for authentication...')
         time.sleep(5)
 
+        recaptcha_solution = None
+
         if detect_recaptcha(driver):
             print("⚠️ reCAPTCHA appeared AFTER login click!")
 
-            # Try to solve with 2captcha
-            if solve_recaptcha_with_2captcha(driver, driver.current_url):
-                print("✓ reCAPTCHA solved successfully with 2captcha!")
-                time.sleep(3)  # Wait for submission
-            else:
-                print("⚠️ 2captcha solving failed, waiting 20 seconds...")
-                time.sleep(20)
+            # Get the reCAPTCHA sitekey
+            sitekey = get_recaptcha_sitekey(driver)
+            if not sitekey:
+                print("✗ Could not find reCAPTCHA sitekey")
+                return None
 
-                # Check again
-                if detect_recaptcha(driver):
-                    print("reCAPTCHA still present. Retrying with different pattern...")
-                    driver.quit()
-                    random_delay(5, 10)  # Longer delay between retries
+            print(f"✓ Found reCAPTCHA sitekey: {sitekey}")
 
-                    # Create new driver with different fingerprint
-                    driver = create_stealth_driver()
-                    wait = WebDriverWait(driver, 20)
-                    return perform_login_with_retries(driver, wait, config, retry_count + 1)
+            # Solve using 2captcha
+            print("Solving reCAPTCHA with 2captcha...")
+            submit_url = "http://2captcha.com/in.php"
+            submit_params = {
+                'key': TWOCAPTCHA_API_KEY,
+                'method': 'userrecaptcha',
+                'googlekey': sitekey,
+                'pageurl': driver.current_url,
+                'json': 1
+            }
 
-        # Try to extract JWT token
-        print('Extracting JWT token from localStorage...')
+            response = requests.get(submit_url, params=submit_params, timeout=30)
+            result = response.json()
+
+            if result.get('status') != 1:
+                print(f"✗ 2captcha submission failed: {result.get('request', 'Unknown error')}")
+                return None
+
+            captcha_id = result.get('request')
+            print(f"✓ Captcha submitted. ID: {captcha_id}")
+            print("Waiting for solution (this may take 30-60 seconds)...")
+
+            # Poll for solution
+            result_url = "http://2captcha.com/res.php"
+            max_attempts = 30
+
+            for attempt in range(max_attempts):
+                time.sleep(5)
+
+                result_params = {
+                    'key': TWOCAPTCHA_API_KEY,
+                    'action': 'get',
+                    'id': captcha_id,
+                    'json': 1
+                }
+
+                response = requests.get(result_url, params=result_params, timeout=30)
+                result = response.json()
+
+                if result.get('status') == 1:
+                    recaptcha_solution = result.get('request')
+                    print(f"✓ reCAPTCHA solved! (took {(attempt + 1) * 5} seconds)")
+                    break
+                elif result.get('request') == 'CAPCHA_NOT_READY':
+                    print(f"  Waiting for solution... ({attempt + 1}/{max_attempts})")
+                    continue
+                else:
+                    print(f"✗ 2captcha error: {result.get('request', 'Unknown error')}")
+                    return None
+
+        # Now try API-based login with the reCAPTCHA solution
         jwt_token = None
 
-        # Poll for up to 30 seconds
-        for i in range(15):
-            jwt_token = driver.execute_script("return window.localStorage.getItem('jsonwebToken');")
+        if recaptcha_solution:
+            print("\n🔑 Using API-based login (more reliable than browser automation)")
+            jwt_token = perform_api_login(
+                config['username'],
+                config['password'],
+                recaptcha_solution,
+                config['api_base']
+            )
+
             if jwt_token:
-                print(f"✓ JWT token extracted successfully!")
-                break
-            print(f"  Waiting for token... ({i+1}/15)")
-            time.sleep(2)
+                print("✓ API login successful!")
+            else:
+                print("✗ API login failed, falling back to browser method...")
+
+        # Fallback: Try to extract JWT token from localStorage (browser automation method)
+        if not jwt_token:
+            print('Extracting JWT token from localStorage (fallback method)...')
+
+            # Poll for up to 30 seconds
+            for i in range(15):
+                jwt_token = driver.execute_script("return window.localStorage.getItem('jsonwebToken');")
+                if jwt_token:
+                    print(f"✓ JWT token extracted from browser!")
+                    break
+                print(f"  Waiting for token... ({i+1}/15)")
+                time.sleep(2)
 
         if not jwt_token:
-            print("✗ JWT token not found in localStorage")
+            print("✗ JWT token not found via any method")
 
             # Check if we're still on login page (login failed)
             current_url = driver.current_url
