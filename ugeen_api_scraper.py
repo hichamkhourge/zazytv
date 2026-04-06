@@ -172,7 +172,7 @@ def get_recaptcha_sitekey(driver):
                 return sitekey
 
         # Method 3: Check JavaScript variables
-        sitekey = driver.execute_script("""
+        sitekey = driver.execute_script(r"""
             var sitekey = null;
             var scripts = document.getElementsByTagName('script');
             for (var i = 0; i < scripts.length; i++) {
@@ -250,19 +250,41 @@ def solve_recaptcha_with_2captcha(driver, page_url):
                 # Inject the solution into the page
                 print("Injecting solution into page...")
                 driver.execute_script(f"""
-                    document.getElementById('g-recaptcha-response').innerHTML = '{captcha_solution}';
+                    // Set the response in the textarea
+                    var textarea = document.getElementById('g-recaptcha-response');
+                    if (textarea) {{
+                        textarea.innerHTML = '{captcha_solution}';
+                        textarea.value = '{captcha_solution}';
+                    }}
+
+                    // Override grecaptcha.getResponse
                     if (typeof grecaptcha !== 'undefined') {{
                         grecaptcha.getResponse = function() {{ return '{captcha_solution}'; }};
                     }}
                 """)
 
-                # Try to submit the form or trigger callback
-                driver.execute_script("""
-                    var callback = window.recaptchaCallback || window.onRecaptchaSuccess;
-                    if (callback) callback();
-                """)
+                # Try multiple ways to submit the form
+                print("Attempting to submit form after captcha...")
+                try:
+                    # Method 1: Try to find and execute callback
+                    driver.execute_script("""
+                        var callback = window.recaptchaCallback || window.onRecaptchaSuccess;
+                        if (callback && typeof callback === 'function') {
+                            callback();
+                            return true;
+                        }
+                        return false;
+                    """)
 
-                time.sleep(2)
+                    # Method 2: Try to click the submit button again
+                    time.sleep(2)
+                    submit_button = driver.find_element(By.CSS_SELECTOR, '#submit')
+                    submit_button.click()
+                    print("✓ Form resubmitted after captcha")
+                except Exception as e:
+                    print(f"Note: Could not resubmit form: {e}")
+
+                time.sleep(3)
                 return True
 
             elif result.get('request') == 'CAPCHA_NOT_READY':
