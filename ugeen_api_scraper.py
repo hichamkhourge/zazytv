@@ -276,15 +276,36 @@ def solve_recaptcha_with_2captcha(driver, page_url):
                         return false;
                     """)
 
-                    # Method 2: Try to click the submit button again
+                    # Method 2: Close/remove any reCAPTCHA overlays
+                    print("Removing reCAPTCHA overlays...")
+                    driver.execute_script("""
+                        // Remove the reCAPTCHA overlay/backdrop
+                        var overlays = document.querySelectorAll('div[style*="z-index: 2000000000"]');
+                        overlays.forEach(function(el) { el.remove(); });
+
+                        // Try to close reCAPTCHA iframe
+                        var iframes = document.querySelectorAll('iframe[src*="recaptcha"]');
+                        iframes.forEach(function(iframe) {
+                            if (iframe.style.width === '100%' || iframe.style.height === '100%') {
+                                iframe.style.display = 'none';
+                            }
+                        });
+                    """)
+
+                    # Method 3: Try to click the submit button using JavaScript (bypasses overlay)
                     time.sleep(2)
-                    submit_button = driver.find_element(By.CSS_SELECTOR, '#submit')
-                    submit_button.click()
+                    print("Clicking submit button via JavaScript...")
+                    driver.execute_script("""
+                        var submitBtn = document.getElementById('submit');
+                        if (submitBtn) {
+                            submitBtn.click();
+                        }
+                    """)
                     print("✓ Form resubmitted after captcha")
                 except Exception as e:
                     print(f"Note: Could not resubmit form: {e}")
 
-                time.sleep(3)
+                time.sleep(5)
                 return True
 
             elif result.get('request') == 'CAPCHA_NOT_READY':
