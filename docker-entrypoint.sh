@@ -46,6 +46,20 @@ echo "Cron Schedule:"
 crontab -l
 echo ""
 
+# Start Xvfb virtual display for headless Chrome automation
+echo "[*] Starting Xvfb virtual display..."
+Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+XVFB_PID=$!
+sleep 2
+
+# Verify Xvfb is running
+if ps -p $XVFB_PID > /dev/null 2>&1; then
+    echo "[✓] Xvfb started successfully (PID: $XVFB_PID, DISPLAY=:99)"
+else
+    echo "[!] WARNING: Xvfb failed to start, headless Chrome may have issues"
+fi
+echo ""
+
 # Start cron in foreground
 echo "[*] Starting cron daemon..."
 echo "[*] Logs will be written to /var/log/cron.log"

@@ -571,8 +571,19 @@ def create_stealth_driver(proxy=None, headless=None):
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
 
+    # Detect if running in Docker with Xvfb virtual display
+    in_docker = os.path.exists('/.dockerenv')
+    display_set = os.environ.get('DISPLAY') is not None
+
     if headless:
-        options.add_argument('--headless=new')
+        # CRITICAL: Skip headless mode when Xvfb is available
+        # Chrome will render to the virtual display (DISPLAY=:99) instead
+        if in_docker and display_set:
+            print(f"✓ Running in headed mode with Xvfb (DISPLAY={os.environ.get('DISPLAY')})")
+            print("  This allows JavaScript callbacks to execute properly in production")
+        else:
+            options.add_argument('--headless=new')
+            print("Running in headless mode (no virtual display detected)")
 
     if proxy:
         options.add_argument(f'--proxy-server={proxy}')
