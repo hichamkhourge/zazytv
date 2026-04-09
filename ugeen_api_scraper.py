@@ -38,7 +38,7 @@ UGEEN_SESSION_DIR = os.getenv('UGEEN_SESSION_DIR', './ugeen_sessions')
 UGEEN_DATA_DIR = os.getenv('UGEEN_DATA_DIR', './ugeen_data')
 
 # Submit button configuration (for production reliability)
-CAPTCHA_POST_SOLVE_WAIT = int(os.getenv('CAPTCHA_POST_SOLVE_WAIT', '8'))  # Seconds to wait after solving CAPTCHA (increased for production)
+CAPTCHA_POST_SOLVE_WAIT = int(os.getenv('CAPTCHA_POST_SOLVE_WAIT', '10'))  # Seconds to wait after solving CAPTCHA (increased for production)
 SUBMIT_BUTTON_TIMEOUT = int(os.getenv('SUBMIT_BUTTON_TIMEOUT', '20'))  # Max seconds to wait for submit button
 SUBMIT_MAX_RETRIES = int(os.getenv('SUBMIT_MAX_RETRIES', '3'))  # Number of submit attempts
 ENABLE_SUBMIT_SCREENSHOTS = os.getenv('ENABLE_SUBMIT_SCREENSHOTS', 'True').lower() == 'true'  # Save debug screenshots
@@ -517,17 +517,90 @@ def solve_recaptcha_with_2captcha(driver, page_url, use_api_login=True):
                     window.recaptchaResponse = '{captcha_solution}';
                 """)
 
-                print("Verifying CAPTCHA injection...")
+                # CRITICAL: Close/remove the reCAPTCHA challenge popup BEFORE submitting
+                print("Closing reCAPTCHA challenge popup...")
+                driver.execute_script("""
+                    // Method 1: Remove ALL reCAPTCHA iframes (challenge popups)
+                    var recaptchaIframes = document.querySelectorAll('iframe[src*="recaptcha/api2/bframe"], iframe[src*="recaptcha/enterprise/bframe"]');
+                    console.log('Found ' + recaptchaIframes.length + ' reCAPTCHA challenge iframes');
+                    recaptchaIframes.forEach(function(iframe) {
+                        // Hide the challenge iframe
+                        iframe.style.display = 'none';
+                        iframe.style.visibility = 'hidden';
+                        iframe.style.opacity = '0';
+                        // Also try to remove it completely
+                        if (iframe.parentElement) {
+                            iframe.parentElement.style.display = 'none';
+                        }
+                    });
+
+                    // Method 2: Remove the backdrop/overlay divs
+                    var overlays = document.querySelectorAll('div[style*="z-index"]');
+                    overlays.forEach(function(overlay) {
+                        var zIndex = window.getComputedStyle(overlay).zIndex;
+                        // Remove high z-index overlays (typical for reCAPTCHA: 2000000000+)
+                        if (zIndex && parseInt(zIndex) > 1000000) {
+                            console.log('Removing overlay with z-index: ' + zIndex);
+                            overlay.remove();
+                        }
+                    });
+
+                    // Method 3: Force hide any visible reCAPTCHA containers
+                    var recaptchaContainers = document.querySelectorAll('[class*="recaptcha"], [id*="recaptcha"]');
+                    recaptchaContainers.forEach(function(container) {
+                        // Don't hide the invisible badge (small size)
+                        if (container.offsetHeight > 100 || container.offsetWidth > 300) {
+                            container.style.display = 'none';
+                            console.log('Hiding large reCAPTCHA container');
+                        }
+                    });
+
+                    // Method 4: Re-enable body scrolling (reCAPTCHA often disables it)
+                    document.body.style.overflow = 'auto';
+
+                    console.log('reCAPTCHA challenge popup removed');
+                """)
+
+                # Wait a moment for the DOM to update
+                time.sleep(2)
+
+                print("Verifying CAPTCHA injection and popup removal...")
                 verification = driver.execute_script("""
                     var textarea = document.getElementById('g-recaptcha-response');
                     var hiddenInput = document.querySelector('input[name="recaptcha"]');
+
+                    // Check if any visible CAPTCHA challenges remain
+                    var visibleChallenges = 0;
+                    var challengeIframes = document.querySelectorAll('iframe[src*="recaptcha/api2/bframe"], iframe[src*="recaptcha/enterprise/bframe"]');
+                    challengeIframes.forEach(function(iframe) {
+                        if (iframe.offsetParent !== null && iframe.style.display !== 'none') {
+                            visibleChallenges++;
+                        }
+                    });
+
                     return {
                         'textarea_value': textarea ? textarea.value.substring(0, 50) + '...' : null,
                         'hidden_input_value': hiddenInput ? hiddenInput.value.substring(0, 50) + '...' : null,
-                        'grecaptcha_available': typeof grecaptcha !== 'undefined'
+                        'grecaptcha_available': typeof grecaptcha !== 'undefined',
+                        'visible_challenge_iframes': visibleChallenges,
+                        'popup_removed': visibleChallenges === 0
                     };
                 """)
                 print(f"  CAPTCHA injection verification: {verification}")
+
+                if not verification.get('popup_removed'):
+                    print(f"  ⚠️ WARNING: {verification.get('visible_challenge_iframes', 0)} reCAPTCHA challenge popups still visible!")
+                else:
+                    print("  ✓ All reCAPTCHA challenge popups removed")
+
+                # Take screenshot after cleanup
+                if ENABLE_SUBMIT_SCREENSHOTS:
+                    try:
+                        screenshot_path = os.path.join(UGEEN_DATA_DIR, f'post_cleanup_{int(time.time())}.png')
+                        driver.save_screenshot(screenshot_path)
+                        print(f"  Post-cleanup screenshot: {screenshot_path}")
+                    except Exception as e:
+                        print(f"  Could not save post-cleanup screenshot: {e}")
 
                 # Use the robust submit function
                 print("Submitting form after CAPTCHA solution...")
