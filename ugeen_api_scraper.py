@@ -38,7 +38,7 @@ UGEEN_SESSION_DIR = os.getenv('UGEEN_SESSION_DIR', './ugeen_sessions')
 UGEEN_DATA_DIR = os.getenv('UGEEN_DATA_DIR', './ugeen_data')
 
 # Submit button configuration (for production reliability)
-CAPTCHA_POST_SOLVE_WAIT = int(os.getenv('CAPTCHA_POST_SOLVE_WAIT', '10'))  # Seconds to wait after solving CAPTCHA (increased for production)
+CAPTCHA_POST_SOLVE_WAIT = int(os.getenv('CAPTCHA_POST_SOLVE_WAIT', '3'))  # Seconds to wait after solving CAPTCHA (reduced to prevent token expiry)
 SUBMIT_BUTTON_TIMEOUT = int(os.getenv('SUBMIT_BUTTON_TIMEOUT', '20'))  # Max seconds to wait for submit button
 SUBMIT_MAX_RETRIES = int(os.getenv('SUBMIT_MAX_RETRIES', '3'))  # Number of submit attempts
 ENABLE_SUBMIT_SCREENSHOTS = os.getenv('ENABLE_SUBMIT_SCREENSHOTS', 'True').lower() == 'true'  # Save debug screenshots
@@ -210,12 +210,47 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
     """
     log_message(f"Attempting to submit {form_context} form after CAPTCHA...", "INFO")
 
-    # Enable network request logging
+    # Inject JavaScript to monitor AJAX requests
     try:
-        driver.execute_cdp_cmd('Network.enable', {})
-        log_message("Network monitoring enabled", "DEBUG")
-    except:
-        pass
+        driver.execute_script("""
+            window.ajaxRequests = [];
+            window.ajaxResponses = [];
+
+            // Intercept XMLHttpRequest
+            var origOpen = XMLHttpRequest.prototype.open;
+            XMLHttpRequest.prototype.open = function() {
+                this.addEventListener('load', function() {
+                    window.ajaxResponses.push({
+                        url: arguments[1],
+                        status: this.status,
+                        response: this.responseText ? this.responseText.substring(0, 500) : null
+                    });
+                });
+                window.ajaxRequests.push({url: arguments[1], method: arguments[0]});
+                return origOpen.apply(this, arguments);
+            };
+
+            // Intercept fetch
+            var origFetch = window.fetch;
+            window.fetch = function() {
+                window.ajaxRequests.push({url: arguments[0], method: 'FETCH'});
+                return origFetch.apply(this, arguments).then(function(response) {
+                    response.clone().text().then(function(text) {
+                        window.ajaxResponses.push({
+                            url: arguments[0],
+                            status: response.status,
+                            response: text ? text.substring(0, 500) : null
+                        });
+                    });
+                    return response;
+                });
+            };
+
+            console.log('AJAX monitoring injected');
+        """)
+        log_message("AJAX monitoring JavaScript injected", "DEBUG")
+    except Exception as e:
+        log_message(f"Could not inject AJAX monitoring: {e}", "DEBUG")
 
     # Wait after CAPTCHA solution injection to let callbacks execute
     log_message(f"Waiting {CAPTCHA_POST_SOLVE_WAIT}s for CAPTCHA callbacks to complete...", "INFO")
@@ -300,19 +335,31 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
                 # Wait a bit longer for AJAX response
                 time.sleep(3)
 
-                # Try to capture network requests (AJAX responses)
+                # Capture AJAX requests made after form submission
                 try:
-                    logs = driver.get_log('performance')
-                    for entry in logs[-10:]:  # Check last 10 network requests
-                        log_data = json.loads(entry['message'])
-                        if 'Network.responseReceived' in log_data['message']['method']:
-                            response = log_data['message']['params']['response']
-                            if 'login' in response.get('url', '').lower() or 'signin' in response.get('url', '').lower() or 'auth' in response.get('url', '').lower():
-                                log_message(f"  Network response detected:", "DEBUG")
-                                log_message(f"    URL: {response.get('url', 'unknown')}", "DEBUG")
-                                log_message(f"    Status: {response.get('status', 'unknown')}", "DEBUG")
+                    ajax_data = driver.execute_script("""
+                        return {
+                            requests: window.ajaxRequests || [],
+                            responses: window.ajaxResponses || []
+                        };
+                    """)
+
+                    if ajax_data.get('requests'):
+                        log_message(f"  AJAX requests detected: {len(ajax_data['requests'])}", "INFO")
+                        for req in ajax_data['requests']:
+                            log_message(f"    → {req.get('method', 'GET')} {req.get('url', 'unknown')}", "DEBUG")
+
+                    if ajax_data.get('responses'):
+                        log_message(f"  AJAX responses detected: {len(ajax_data['responses'])}", "INFO")
+                        for resp in ajax_data['responses']:
+                            log_message(f"    ← Status {resp.get('status', 'unknown')}: {resp.get('url', 'unknown')}", "DEBUG")
+                            if resp.get('response'):
+                                log_message(f"      Response preview: {resp['response'][:200]}", "DEBUG")
+                    elif not ajax_data.get('requests'):
+                        log_message("  ⚠️ No AJAX requests detected - form might not be submitting!", "WARNING")
+
                 except Exception as e:
-                    log_message(f"  Could not capture network logs: {e}", "DEBUG")
+                    log_message(f"  Could not capture AJAX logs: {e}", "DEBUG")
 
                 # Check for any error messages or validation issues
                 try:
@@ -533,6 +580,31 @@ def solve_recaptcha_with_2captcha(driver, page_url, use_api_login=True):
                     else:
                         print("⚠️ API login failed, falling back to browser automation...")
 
+                # Inject AJAX monitoring BEFORE injecting CAPTCHA solution
+                print("Setting up AJAX monitoring...")
+                driver.execute_script("""
+                    window.ajaxRequests = [];
+                    window.ajaxResponses = [];
+
+                    // Intercept XMLHttpRequest
+                    var origOpen = XMLHttpRequest.prototype.open;
+                    XMLHttpRequest.prototype.open = function() {
+                        var xhr = this;
+                        this.addEventListener('load', function() {
+                            window.ajaxResponses.push({
+                                url: xhr._url,
+                                status: xhr.status,
+                                response: xhr.responseText ? xhr.responseText.substring(0, 500) : null
+                            });
+                        });
+                        xhr._url = arguments[1];
+                        xhr._method = arguments[0];
+                        window.ajaxRequests.push({url: arguments[1], method: arguments[0]});
+                        return origOpen.apply(this, arguments);
+                    };
+                    console.log('AJAX monitoring active');
+                """)
+
                 # Fallback: Inject the solution into the page (traditional browser automation)
                 print("Injecting solution into page...")
                 driver.execute_script(f"""
@@ -617,8 +689,8 @@ def solve_recaptcha_with_2captcha(driver, page_url, use_api_login=True):
                     console.log('reCAPTCHA challenge popup removed');
                 """)
 
-                # Wait a moment for the DOM to update
-                time.sleep(2)
+                # Wait briefly for the DOM to update (reduced to minimize token staleness)
+                time.sleep(1)
 
                 print("Verifying CAPTCHA injection and popup removal...")
                 verification = driver.execute_script("""
