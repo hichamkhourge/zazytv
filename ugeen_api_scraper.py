@@ -41,7 +41,6 @@ UGEEN_DATA_DIR = os.getenv('UGEEN_DATA_DIR', './ugeen_data')
 CAPTCHA_POST_SOLVE_WAIT = int(os.getenv('CAPTCHA_POST_SOLVE_WAIT', '3'))  # Seconds to wait after solving CAPTCHA (reduced to prevent token expiry)
 SUBMIT_BUTTON_TIMEOUT = int(os.getenv('SUBMIT_BUTTON_TIMEOUT', '20'))  # Max seconds to wait for submit button
 SUBMIT_MAX_RETRIES = int(os.getenv('SUBMIT_MAX_RETRIES', '3'))  # Number of submit attempts
-ENABLE_SUBMIT_SCREENSHOTS = os.getenv('ENABLE_SUBMIT_SCREENSHOTS', 'True').lower() == 'true'  # Save debug screenshots
 
 # Create directories if they don't exist
 Path(UGEEN_SESSION_DIR).mkdir(parents=True, exist_ok=True)
@@ -210,60 +209,9 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
     """
     log_message(f"Attempting to submit {form_context} form after CAPTCHA...", "INFO")
 
-    # Inject JavaScript to monitor AJAX requests
-    try:
-        driver.execute_script("""
-            window.ajaxRequests = [];
-            window.ajaxResponses = [];
-
-            // Intercept XMLHttpRequest
-            var origOpen = XMLHttpRequest.prototype.open;
-            XMLHttpRequest.prototype.open = function() {
-                this.addEventListener('load', function() {
-                    window.ajaxResponses.push({
-                        url: arguments[1],
-                        status: this.status,
-                        response: this.responseText ? this.responseText.substring(0, 500) : null
-                    });
-                });
-                window.ajaxRequests.push({url: arguments[1], method: arguments[0]});
-                return origOpen.apply(this, arguments);
-            };
-
-            // Intercept fetch
-            var origFetch = window.fetch;
-            window.fetch = function() {
-                window.ajaxRequests.push({url: arguments[0], method: 'FETCH'});
-                return origFetch.apply(this, arguments).then(function(response) {
-                    response.clone().text().then(function(text) {
-                        window.ajaxResponses.push({
-                            url: arguments[0],
-                            status: response.status,
-                            response: text ? text.substring(0, 500) : null
-                        });
-                    });
-                    return response;
-                });
-            };
-
-            console.log('AJAX monitoring injected');
-        """)
-        log_message("AJAX monitoring JavaScript injected", "DEBUG")
-    except Exception as e:
-        log_message(f"Could not inject AJAX monitoring: {e}", "DEBUG")
-
     # Wait after CAPTCHA solution injection to let callbacks execute
     log_message(f"Waiting {CAPTCHA_POST_SOLVE_WAIT}s for CAPTCHA callbacks to complete...", "INFO")
     time.sleep(CAPTCHA_POST_SOLVE_WAIT)
-
-    # Take screenshot before submission attempt (if enabled)
-    if ENABLE_SUBMIT_SCREENSHOTS:
-        try:
-            screenshot_path = os.path.join(UGEEN_DATA_DIR, f'pre_submit_{form_context}_{int(time.time())}.png')
-            driver.save_screenshot(screenshot_path)
-            log_message(f"Pre-submit screenshot saved: {screenshot_path}", "DEBUG")
-        except Exception as e:
-            log_message(f"Could not save screenshot: {e}", "WARNING")
 
     # Define multiple submit button selectors (in order of preference)
     submit_selectors = [
@@ -287,7 +235,6 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
 
         for by, selector in submit_selectors:
             try:
-                log_message(f"  Trying selector: {by}='{selector}'", "DEBUG")
                 wait = WebDriverWait(driver, SUBMIT_BUTTON_TIMEOUT)
                 submit_button = wait.until(EC.presence_of_element_located((by, selector)))
 
@@ -297,7 +244,6 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
                     log_message(f"  ✓ Found submit button: {used_selector}", "INFO")
                     break
                 else:
-                    log_message(f"  Button found but not visible/enabled", "DEBUG")
                     submit_button = None
             except Exception as e:
                 continue
@@ -305,7 +251,6 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
         if submit_button:
             try:
                 # Scroll element into view
-                log_message("  Scrolling submit button into view...", "DEBUG")
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_button)
                 time.sleep(0.5)
 
@@ -346,15 +291,6 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
 
                     if ajax_data.get('requests'):
                         log_message(f"  AJAX requests detected: {len(ajax_data['requests'])}", "INFO")
-                        for req in ajax_data['requests']:
-                            log_message(f"    → {req.get('method', 'GET')} {req.get('url', 'unknown')}", "DEBUG")
-
-                    if ajax_data.get('responses'):
-                        log_message(f"  AJAX responses detected: {len(ajax_data['responses'])}", "INFO")
-                        for resp in ajax_data['responses']:
-                            log_message(f"    ← Status {resp.get('status', 'unknown')}: {resp.get('url', 'unknown')}", "DEBUG")
-                            if resp.get('response'):
-                                log_message(f"      Response preview: {resp['response'][:200]}", "DEBUG")
                     elif not ajax_data.get('requests'):
                         log_message("  ⚠️ No AJAX requests detected - form might not be submitting!", "WARNING")
 
@@ -415,13 +351,6 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
                         log_message(f"  ⚠️ Errors/messages detected after submit:", "WARNING")
                         for err in error_check.get('errors', []):
                             log_message(f"    - {err}", "WARNING")
-                    log_message(f"  Post-submit URL: {error_check.get('current_url', 'unknown')}", "DEBUG")
-
-                    # Take post-submit screenshot if errors detected
-                    if error_check.get('errors') and ENABLE_SUBMIT_SCREENSHOTS:
-                        screenshot_path = os.path.join(UGEEN_DATA_DIR, f'post_submit_error_{form_context}_{int(time.time())}.png')
-                        driver.save_screenshot(screenshot_path)
-                        log_message(f"  Post-submit error screenshot: {screenshot_path}", "WARNING")
                 except Exception as e:
                     log_message(f"  Could not check for errors: {e}", "DEBUG")
                     pass
@@ -441,30 +370,7 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
                 except Exception as js_error:
                     log_message(f"  JavaScript click also failed: {js_error}", "WARNING")
 
-        # Strategy 2: Check form validation state
-        try:
-            validation_check = driver.execute_script("""
-                var form = document.querySelector('form');
-                if (!form) return {error: 'No form found'};
-
-                return {
-                    'checkValidity': form.checkValidity ? form.checkValidity() : 'unknown',
-                    'formAction': form.action || 'not set',
-                    'formMethod': form.method || 'not set',
-                    'hasSubmitButton': !!document.getElementById('submit'),
-                    'recaptchaResponse': document.getElementById('g-recaptcha-response') ?
-                        document.getElementById('g-recaptcha-response').value.substring(0, 50) : 'not found'
-                };
-            """)
-            log_message(f"  Form validation check: {validation_check}", "DEBUG")
-
-            # If form validation is failing, it might be preventing submission
-            if validation_check.get('checkValidity') == False:
-                log_message("  ⚠️ Form validation is FAILING - this is blocking submission!", "WARNING")
-        except Exception as e:
-            log_message(f"  Could not check form validation: {e}", "DEBUG")
-
-        # Strategy 3: Direct JavaScript form submission (if button clicks fail)
+        # Strategy 2: Direct JavaScript form submission (if button clicks fail)
         if attempt == SUBMIT_MAX_RETRIES - 1:  # Last attempt
             log_message("  All button clicks failed. Trying direct form.submit()...", "WARNING")
             try:
@@ -516,22 +422,6 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
 
     # If we get here, all attempts failed
     log_message(f"✗ All {SUBMIT_MAX_RETRIES} submit attempts failed!", "ERROR")
-
-    # Take screenshot of failure (if enabled)
-    if ENABLE_SUBMIT_SCREENSHOTS:
-        try:
-            screenshot_path = os.path.join(UGEEN_DATA_DIR, f'submit_failed_{form_context}_{int(time.time())}.png')
-            driver.save_screenshot(screenshot_path)
-            log_message(f"Failure screenshot saved: {screenshot_path}", "ERROR")
-
-            # Also save HTML source for debugging
-            html_path = os.path.join(UGEEN_DATA_DIR, f'submit_failed_{form_context}_{int(time.time())}.html')
-            with open(html_path, 'w', encoding='utf-8') as f:
-                f.write(driver.page_source)
-            log_message(f"HTML source saved: {html_path}", "ERROR")
-        except Exception as e:
-            log_message(f"Could not save failure artifacts: {e}", "WARNING")
-
     return False
 
 def solve_recaptcha_with_2captcha(driver, page_url, use_api_login=True):
@@ -817,15 +707,6 @@ def solve_recaptcha_with_2captcha(driver, page_url, use_api_login=True):
                     print(f"  ⚠️ WARNING: {verification.get('visible_challenge_iframes', 0)} reCAPTCHA challenge popups still visible!")
                 else:
                     print("  ✓ All reCAPTCHA challenge popups removed")
-
-                # Take screenshot after cleanup
-                if ENABLE_SUBMIT_SCREENSHOTS:
-                    try:
-                        screenshot_path = os.path.join(UGEEN_DATA_DIR, f'post_cleanup_{int(time.time())}.png')
-                        driver.save_screenshot(screenshot_path)
-                        print(f"  Post-cleanup screenshot: {screenshot_path}")
-                    except Exception as e:
-                        print(f"  Could not save post-cleanup screenshot: {e}")
 
                 # Use the robust submit function
                 print("Submitting form after CAPTCHA solution...")
