@@ -441,30 +441,68 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
                 except Exception as js_error:
                     log_message(f"  JavaScript click also failed: {js_error}", "WARNING")
 
-        # Strategy 2: Direct JavaScript form submission (if button clicks fail)
+        # Strategy 2: Check form validation state
+        try:
+            validation_check = driver.execute_script("""
+                var form = document.querySelector('form');
+                if (!form) return {error: 'No form found'};
+
+                return {
+                    'checkValidity': form.checkValidity ? form.checkValidity() : 'unknown',
+                    'formAction': form.action || 'not set',
+                    'formMethod': form.method || 'not set',
+                    'hasSubmitButton': !!document.getElementById('submit'),
+                    'recaptchaResponse': document.getElementById('g-recaptcha-response') ?
+                        document.getElementById('g-recaptcha-response').value.substring(0, 50) : 'not found'
+                };
+            """)
+            log_message(f"  Form validation check: {validation_check}", "DEBUG")
+
+            # If form validation is failing, it might be preventing submission
+            if validation_check.get('checkValidity') == False:
+                log_message("  ⚠️ Form validation is FAILING - this is blocking submission!", "WARNING")
+        except Exception as e:
+            log_message(f"  Could not check form validation: {e}", "DEBUG")
+
+        # Strategy 3: Direct JavaScript form submission (if button clicks fail)
         if attempt == SUBMIT_MAX_RETRIES - 1:  # Last attempt
             log_message("  All button clicks failed. Trying direct form.submit()...", "WARNING")
             try:
-                # Find the form and submit it directly
-                driver.execute_script("""
-                    // Try to find and submit the form directly
-                    var forms = document.getElementsByTagName('form');
-                    if (forms.length > 0) {
-                        forms[0].submit();
-                        return true;
+                # Find the form and submit it directly, bypassing validation
+                result = driver.execute_script("""
+                    var form = document.querySelector('form');
+                    if (!form) return {success: false, error: 'No form found'};
+
+                    // First, check if there's a submit handler we should call
+                    var submitBtn = document.getElementById('submit');
+                    if (submitBtn && submitBtn.onclick) {
+                        try {
+                            submitBtn.onclick.call(submitBtn);
+                            return {success: true, method: 'onclick handler'};
+                        } catch (e) {
+                            // Continue to other methods
+                        }
                     }
 
-                    // Alternative: trigger submit event on the form
-                    var submitBtn = document.getElementById('submit') ||
-                                   document.querySelector('button[type="submit"]') ||
-                                   document.querySelector('input[type="submit"]');
-                    if (submitBtn) {
-                        submitBtn.click();
-                        return true;
+                    // Try form.requestSubmit() which triggers validation
+                    if (form.requestSubmit) {
+                        try {
+                            form.requestSubmit();
+                            return {success: true, method: 'requestSubmit'};
+                        } catch (e) {
+                            // Continue to other methods
+                        }
                     }
-                    return false;
+
+                    // Last resort: form.submit() which bypasses validation
+                    try {
+                        form.submit();
+                        return {success: true, method: 'form.submit'};
+                    } catch (e) {
+                        return {success: false, error: e.toString()};
+                    }
                 """)
-                log_message("  ✓ Direct form submission executed", "SUCCESS")
+                log_message(f"  Direct form submission result: {result}", "INFO")
                 time.sleep(2)
                 return True
             except Exception as form_error:
@@ -616,9 +654,66 @@ def solve_recaptcha_with_2captcha(driver, page_url, use_api_login=True):
                         textarea.style.display = '';  // Make it visible
                     }}
 
-                    // Override grecaptcha.getResponse
+                    // CRITICAL: Override grecaptcha methods to mark reCAPTCHA as solved
                     if (typeof grecaptcha !== 'undefined') {{
-                        grecaptcha.getResponse = function() {{ return '{captcha_solution}'; }};
+                        // Override getResponse to return the solution
+                        grecaptcha.getResponse = function() {{
+                            console.log('grecaptcha.getResponse called, returning solution');
+                            return '{captcha_solution}';
+                        }};
+
+                        // Mark reCAPTCHA as ready/solved
+                        if (grecaptcha.enterprise) {{
+                            grecaptcha.enterprise.getResponse = function() {{ return '{captcha_solution}'; }};
+                        }}
+                    }}
+
+                    // CRITICAL: Trigger the reCAPTCHA callback to mark it as "solved"
+                    // This is what normally happens when you solve it manually
+                    try {{
+                        // Find the reCAPTCHA widget ID
+                        var widgets = document.querySelectorAll('[id^="rc-anchor"]');
+                        if (widgets.length > 0) {{
+                            // Mark the checkbox as checked visually
+                            var checkmark = document.querySelector('.recaptcha-checkbox-checkmark');
+                            if (checkmark) {{
+                                checkmark.style.display = 'block';
+                            }}
+
+                            // Set aria-checked attribute
+                            var checkbox = document.querySelector('.recaptcha-checkbox');
+                            if (checkbox) {{
+                                checkbox.setAttribute('aria-checked', 'true');
+                                checkbox.classList.add('recaptcha-checkbox-checked');
+                            }}
+
+                            console.log('reCAPTCHA checkbox marked as checked');
+                        }}
+                    }} catch (e) {{
+                        console.log('Could not mark checkbox: ' + e);
+                    }}
+
+                    // Execute any registered callbacks
+                    try {{
+                        // Look for common callback patterns
+                        if (typeof onRecaptchaSuccess === 'function') {{
+                            onRecaptchaSuccess('{captcha_solution}');
+                        }}
+                        if (typeof window.recaptchaCallback === 'function') {{
+                            window.recaptchaCallback('{captcha_solution}');
+                        }}
+
+                        // Check if there's a data-callback attribute
+                        var recaptchaDiv = document.querySelector('[data-callback]');
+                        if (recaptchaDiv) {{
+                            var callbackName = recaptchaDiv.getAttribute('data-callback');
+                            if (typeof window[callbackName] === 'function') {{
+                                window[callbackName]('{captcha_solution}');
+                                console.log('Called callback: ' + callbackName);
+                            }}
+                        }}
+                    }} catch (e) {{
+                        console.log('Callback execution error: ' + e);
                     }}
 
                     // CRITICAL: Add a hidden input field with the CAPTCHA solution
@@ -643,6 +738,8 @@ def solve_recaptcha_with_2captcha(driver, page_url, use_api_login=True):
 
                     // Also store in window for callbacks
                     window.recaptchaResponse = '{captcha_solution}';
+
+                    console.log('reCAPTCHA solution fully injected and callbacks triggered');
                 """)
 
                 # CRITICAL: Close/remove the reCAPTCHA challenge popup BEFORE submitting
