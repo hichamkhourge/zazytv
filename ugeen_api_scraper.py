@@ -210,6 +210,13 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
     """
     log_message(f"Attempting to submit {form_context} form after CAPTCHA...", "INFO")
 
+    # Enable network request logging
+    try:
+        driver.execute_cdp_cmd('Network.enable', {})
+        log_message("Network monitoring enabled", "DEBUG")
+    except:
+        pass
+
     # Wait after CAPTCHA solution injection to let callbacks execute
     log_message(f"Waiting {CAPTCHA_POST_SOLVE_WAIT}s for CAPTCHA callbacks to complete...", "INFO")
     time.sleep(CAPTCHA_POST_SOLVE_WAIT)
@@ -290,19 +297,65 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
                 # Wait a moment and check if it worked
                 time.sleep(2)
 
+                # Wait a bit longer for AJAX response
+                time.sleep(3)
+
+                # Try to capture network requests (AJAX responses)
+                try:
+                    logs = driver.get_log('performance')
+                    for entry in logs[-10:]:  # Check last 10 network requests
+                        log_data = json.loads(entry['message'])
+                        if 'Network.responseReceived' in log_data['message']['method']:
+                            response = log_data['message']['params']['response']
+                            if 'login' in response.get('url', '').lower() or 'signin' in response.get('url', '').lower() or 'auth' in response.get('url', '').lower():
+                                log_message(f"  Network response detected:", "DEBUG")
+                                log_message(f"    URL: {response.get('url', 'unknown')}", "DEBUG")
+                                log_message(f"    Status: {response.get('status', 'unknown')}", "DEBUG")
+                except Exception as e:
+                    log_message(f"  Could not capture network logs: {e}", "DEBUG")
+
                 # Check for any error messages or validation issues
                 try:
                     error_check = driver.execute_script("""
                         // Check for common error message patterns
                         var errors = [];
 
-                        // Check for visible error divs
-                        var errorDivs = document.querySelectorAll('.error, .alert-danger, .text-danger, [class*="error"]');
-                        errorDivs.forEach(function(div) {
-                            if (div.offsetParent !== null && div.textContent.trim()) {
-                                errors.push(div.textContent.trim());
+                        // Check for all visible notification/alert elements (including Arabic text)
+                        var errorSelectors = [
+                            '.error', '.alert', '.alert-danger', '.alert-warning',
+                            '.text-danger', '.notification', '.message', '.toast',
+                            '[class*="error"]', '[class*="alert"]', '[class*="message"]',
+                            '[role="alert"]', '.swal2-popup', '.swal-text'
+                        ];
+
+                        errorSelectors.forEach(function(selector) {
+                            var elements = document.querySelectorAll(selector);
+                            elements.forEach(function(el) {
+                                // Check if element is visible
+                                if (el.offsetParent !== null && el.offsetHeight > 0) {
+                                    var text = el.textContent.trim();
+                                    if (text && text.length > 0) {
+                                        errors.push(text);
+                                    }
+                                }
+                            });
+                        });
+
+                        // Also check for any newly appeared divs with text content (might be error notifications)
+                        var allDivs = document.querySelectorAll('div');
+                        allDivs.forEach(function(div) {
+                            var style = window.getComputedStyle(div);
+                            // Check for elements with high z-index (popups/notifications)
+                            if (style.zIndex && parseInt(style.zIndex) > 1000) {
+                                var text = div.textContent.trim();
+                                if (text && text.length > 10 && text.length < 500) {
+                                    errors.push('(High z-index element) ' + text);
+                                }
                             }
                         });
+
+                        // Remove duplicates
+                        errors = [...new Set(errors)];
 
                         // Check if still on same page (URL didn't change)
                         return {
@@ -312,7 +365,9 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
                         };
                     """)
                     if error_check.get('errors'):
-                        log_message(f"  ⚠️ Errors detected after submit: {error_check['errors']}", "WARNING")
+                        log_message(f"  ⚠️ Errors/messages detected after submit:", "WARNING")
+                        for err in error_check.get('errors', []):
+                            log_message(f"    - {err}", "WARNING")
                     log_message(f"  Post-submit URL: {error_check.get('current_url', 'unknown')}", "DEBUG")
 
                     # Take post-submit screenshot if errors detected
@@ -320,7 +375,8 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
                         screenshot_path = os.path.join(UGEEN_DATA_DIR, f'post_submit_error_{form_context}_{int(time.time())}.png')
                         driver.save_screenshot(screenshot_path)
                         log_message(f"  Post-submit error screenshot: {screenshot_path}", "WARNING")
-                except:
+                except Exception as e:
+                    log_message(f"  Could not check for errors: {e}", "DEBUG")
                     pass
 
                 return True
