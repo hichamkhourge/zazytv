@@ -38,7 +38,7 @@ UGEEN_SESSION_DIR = os.getenv('UGEEN_SESSION_DIR', './ugeen_sessions')
 UGEEN_DATA_DIR = os.getenv('UGEEN_DATA_DIR', './ugeen_data')
 
 # Submit button configuration (for production reliability)
-CAPTCHA_POST_SOLVE_WAIT = int(os.getenv('CAPTCHA_POST_SOLVE_WAIT', '5'))  # Seconds to wait after solving CAPTCHA
+CAPTCHA_POST_SOLVE_WAIT = int(os.getenv('CAPTCHA_POST_SOLVE_WAIT', '8'))  # Seconds to wait after solving CAPTCHA (increased for production)
 SUBMIT_BUTTON_TIMEOUT = int(os.getenv('SUBMIT_BUTTON_TIMEOUT', '20'))  # Max seconds to wait for submit button
 SUBMIT_MAX_RETRIES = int(os.getenv('SUBMIT_MAX_RETRIES', '3'))  # Number of submit attempts
 ENABLE_SUBMIT_SCREENSHOTS = os.getenv('ENABLE_SUBMIT_SCREENSHOTS', 'True').lower() == 'true'  # Save debug screenshots
@@ -289,6 +289,40 @@ def submit_form_after_captcha(driver, page_url, form_context="login"):
 
                 # Wait a moment and check if it worked
                 time.sleep(2)
+
+                # Check for any error messages or validation issues
+                try:
+                    error_check = driver.execute_script("""
+                        // Check for common error message patterns
+                        var errors = [];
+
+                        // Check for visible error divs
+                        var errorDivs = document.querySelectorAll('.error, .alert-danger, .text-danger, [class*="error"]');
+                        errorDivs.forEach(function(div) {
+                            if (div.offsetParent !== null && div.textContent.trim()) {
+                                errors.push(div.textContent.trim());
+                            }
+                        });
+
+                        // Check if still on same page (URL didn't change)
+                        return {
+                            'errors': errors,
+                            'current_url': window.location.href,
+                            'page_title': document.title
+                        };
+                    """)
+                    if error_check.get('errors'):
+                        log_message(f"  ⚠️ Errors detected after submit: {error_check['errors']}", "WARNING")
+                    log_message(f"  Post-submit URL: {error_check.get('current_url', 'unknown')}", "DEBUG")
+
+                    # Take post-submit screenshot if errors detected
+                    if error_check.get('errors') and ENABLE_SUBMIT_SCREENSHOTS:
+                        screenshot_path = os.path.join(UGEEN_DATA_DIR, f'post_submit_error_{form_context}_{int(time.time())}.png')
+                        driver.save_screenshot(screenshot_path)
+                        log_message(f"  Post-submit error screenshot: {screenshot_path}", "WARNING")
+                except:
+                    pass
+
                 return True
 
             except Exception as e:
@@ -451,13 +485,49 @@ def solve_recaptcha_with_2captcha(driver, page_url, use_api_login=True):
                     if (textarea) {{
                         textarea.innerHTML = '{captcha_solution}';
                         textarea.value = '{captcha_solution}';
+                        textarea.style.display = '';  // Make it visible
                     }}
 
                     // Override grecaptcha.getResponse
                     if (typeof grecaptcha !== 'undefined') {{
                         grecaptcha.getResponse = function() {{ return '{captcha_solution}'; }};
                     }}
+
+                    // CRITICAL: Add a hidden input field with the CAPTCHA solution
+                    // Many forms expect a 'recaptcha' or 'g-recaptcha-response' POST parameter
+                    var form = document.querySelector('form');
+                    if (form) {{
+                        // Remove any existing recaptcha input to avoid duplicates
+                        var existingInput = form.querySelector('input[name="recaptcha"]');
+                        if (existingInput) {{
+                            existingInput.remove();
+                        }}
+
+                        // Create new hidden input with the CAPTCHA solution
+                        var input = document.createElement('input');
+                        input.type = 'hidden';
+                        input.name = 'recaptcha';  // This matches the API endpoint expectation
+                        input.value = '{captcha_solution}';
+                        form.appendChild(input);
+
+                        console.log('Added recaptcha hidden input to form');
+                    }}
+
+                    // Also store in window for callbacks
+                    window.recaptchaResponse = '{captcha_solution}';
                 """)
+
+                print("Verifying CAPTCHA injection...")
+                verification = driver.execute_script("""
+                    var textarea = document.getElementById('g-recaptcha-response');
+                    var hiddenInput = document.querySelector('input[name="recaptcha"]');
+                    return {
+                        'textarea_value': textarea ? textarea.value.substring(0, 50) + '...' : null,
+                        'hidden_input_value': hiddenInput ? hiddenInput.value.substring(0, 50) + '...' : null,
+                        'grecaptcha_available': typeof grecaptcha !== 'undefined'
+                    };
+                """)
+                print(f"  CAPTCHA injection verification: {verification}")
 
                 # Use the robust submit function
                 print("Submitting form after CAPTCHA solution...")
