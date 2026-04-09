@@ -37,6 +37,12 @@ UGEEN_HEADLESS = os.getenv('UGEEN_HEADLESS', 'True').lower() == 'true'
 UGEEN_SESSION_DIR = os.getenv('UGEEN_SESSION_DIR', './ugeen_sessions')
 UGEEN_DATA_DIR = os.getenv('UGEEN_DATA_DIR', './ugeen_data')
 
+# Submit button configuration (for production reliability)
+CAPTCHA_POST_SOLVE_WAIT = int(os.getenv('CAPTCHA_POST_SOLVE_WAIT', '5'))  # Seconds to wait after solving CAPTCHA
+SUBMIT_BUTTON_TIMEOUT = int(os.getenv('SUBMIT_BUTTON_TIMEOUT', '20'))  # Max seconds to wait for submit button
+SUBMIT_MAX_RETRIES = int(os.getenv('SUBMIT_MAX_RETRIES', '3'))  # Number of submit attempts
+ENABLE_SUBMIT_SCREENSHOTS = os.getenv('ENABLE_SUBMIT_SCREENSHOTS', 'True').lower() == 'true'  # Save debug screenshots
+
 # Create directories if they don't exist
 Path(UGEEN_SESSION_DIR).mkdir(parents=True, exist_ok=True)
 Path(UGEEN_DATA_DIR).mkdir(parents=True, exist_ok=True)
@@ -190,6 +196,169 @@ def get_recaptcha_sitekey(driver):
         print(f"Error extracting sitekey: {e}")
         return None
 
+def submit_form_after_captcha(driver, page_url, form_context="login"):
+    """
+    Robust form submission after CAPTCHA solving with multiple strategies and retries.
+
+    Args:
+        driver: Selenium WebDriver instance
+        page_url: Current page URL (for screenshots)
+        form_context: Context string for logging ("login", "checkout", etc.)
+
+    Returns:
+        bool: True if submission attempted successfully, False otherwise
+    """
+    log_message(f"Attempting to submit {form_context} form after CAPTCHA...", "INFO")
+
+    # Wait after CAPTCHA solution injection to let callbacks execute
+    log_message(f"Waiting {CAPTCHA_POST_SOLVE_WAIT}s for CAPTCHA callbacks to complete...", "INFO")
+    time.sleep(CAPTCHA_POST_SOLVE_WAIT)
+
+    # Take screenshot before submission attempt (if enabled)
+    if ENABLE_SUBMIT_SCREENSHOTS:
+        try:
+            screenshot_path = os.path.join(UGEEN_DATA_DIR, f'pre_submit_{form_context}_{int(time.time())}.png')
+            driver.save_screenshot(screenshot_path)
+            log_message(f"Pre-submit screenshot saved: {screenshot_path}", "DEBUG")
+        except Exception as e:
+            log_message(f"Could not save screenshot: {e}", "WARNING")
+
+    # Define multiple submit button selectors (in order of preference)
+    submit_selectors = [
+        (By.ID, 'submit'),                                    # #submit (most common)
+        (By.CSS_SELECTOR, 'button[type="submit"]'),          # button[type="submit"]
+        (By.CSS_SELECTOR, 'input[type="submit"]'),           # input[type="submit"]
+        (By.CSS_SELECTOR, 'button.submit'),                  # button.submit
+        (By.CSS_SELECTOR, 'button.btn-primary'),             # button.btn-primary
+        (By.XPATH, '//button[contains(text(), "Sign")]'),    # Button with "Sign" text
+        (By.XPATH, '//button[contains(text(), "Login")]'),   # Button with "Login" text
+        (By.XPATH, '//input[@value="Submit"]'),              # Input with Submit value
+    ]
+
+    # Try multiple times with different strategies
+    for attempt in range(SUBMIT_MAX_RETRIES):
+        log_message(f"Submit attempt {attempt + 1}/{SUBMIT_MAX_RETRIES}", "INFO")
+
+        # Strategy 1: Try each selector with explicit wait
+        submit_button = None
+        used_selector = None
+
+        for by, selector in submit_selectors:
+            try:
+                log_message(f"  Trying selector: {by}='{selector}'", "DEBUG")
+                wait = WebDriverWait(driver, SUBMIT_BUTTON_TIMEOUT)
+                submit_button = wait.until(EC.presence_of_element_located((by, selector)))
+
+                # Verify it's visible and enabled
+                if submit_button.is_displayed() and submit_button.is_enabled():
+                    used_selector = f"{by}='{selector}'"
+                    log_message(f"  ✓ Found submit button: {used_selector}", "INFO")
+                    break
+                else:
+                    log_message(f"  Button found but not visible/enabled", "DEBUG")
+                    submit_button = None
+            except Exception as e:
+                continue
+
+        if submit_button:
+            try:
+                # Scroll element into view
+                log_message("  Scrolling submit button into view...", "DEBUG")
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_button)
+                time.sleep(0.5)
+
+                # Remove any overlays that might be blocking
+                driver.execute_script("""
+                    // Remove reCAPTCHA overlays
+                    var overlays = document.querySelectorAll('div[style*="z-index: 2000000000"]');
+                    overlays.forEach(function(el) { el.remove(); });
+
+                    // Hide reCAPTCHA challenge iframes
+                    var iframes = document.querySelectorAll('iframe[src*="recaptcha"]');
+                    iframes.forEach(function(iframe) {
+                        if (iframe.style.width === '100%' || iframe.style.height === '100%') {
+                            iframe.style.display = 'none';
+                        }
+                    });
+                """)
+
+                # Try Selenium click first
+                log_message(f"  Attempting Selenium click on {used_selector}...", "INFO")
+                submit_button.click()
+                log_message(f"  ✓ Selenium click succeeded!", "SUCCESS")
+
+                # Wait a moment and check if it worked
+                time.sleep(2)
+                return True
+
+            except Exception as e:
+                log_message(f"  Selenium click failed: {e}", "WARNING")
+
+                # Fallback: Try JavaScript click
+                try:
+                    log_message("  Attempting JavaScript click...", "INFO")
+                    driver.execute_script("arguments[0].click();", submit_button)
+                    log_message("  ✓ JavaScript click succeeded!", "SUCCESS")
+                    time.sleep(2)
+                    return True
+                except Exception as js_error:
+                    log_message(f"  JavaScript click also failed: {js_error}", "WARNING")
+
+        # Strategy 2: Direct JavaScript form submission (if button clicks fail)
+        if attempt == SUBMIT_MAX_RETRIES - 1:  # Last attempt
+            log_message("  All button clicks failed. Trying direct form.submit()...", "WARNING")
+            try:
+                # Find the form and submit it directly
+                driver.execute_script("""
+                    // Try to find and submit the form directly
+                    var forms = document.getElementsByTagName('form');
+                    if (forms.length > 0) {
+                        forms[0].submit();
+                        return true;
+                    }
+
+                    // Alternative: trigger submit event on the form
+                    var submitBtn = document.getElementById('submit') ||
+                                   document.querySelector('button[type="submit"]') ||
+                                   document.querySelector('input[type="submit"]');
+                    if (submitBtn) {
+                        submitBtn.click();
+                        return true;
+                    }
+                    return false;
+                """)
+                log_message("  ✓ Direct form submission executed", "SUCCESS")
+                time.sleep(2)
+                return True
+            except Exception as form_error:
+                log_message(f"  Direct form submission failed: {form_error}", "ERROR")
+
+        # Wait before retry
+        if attempt < SUBMIT_MAX_RETRIES - 1:
+            wait_time = (attempt + 1) * 2  # Exponential backoff
+            log_message(f"  Waiting {wait_time}s before retry...", "INFO")
+            time.sleep(wait_time)
+
+    # If we get here, all attempts failed
+    log_message(f"✗ All {SUBMIT_MAX_RETRIES} submit attempts failed!", "ERROR")
+
+    # Take screenshot of failure (if enabled)
+    if ENABLE_SUBMIT_SCREENSHOTS:
+        try:
+            screenshot_path = os.path.join(UGEEN_DATA_DIR, f'submit_failed_{form_context}_{int(time.time())}.png')
+            driver.save_screenshot(screenshot_path)
+            log_message(f"Failure screenshot saved: {screenshot_path}", "ERROR")
+
+            # Also save HTML source for debugging
+            html_path = os.path.join(UGEEN_DATA_DIR, f'submit_failed_{form_context}_{int(time.time())}.html')
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(driver.page_source)
+            log_message(f"HTML source saved: {html_path}", "ERROR")
+        except Exception as e:
+            log_message(f"Could not save failure artifacts: {e}", "WARNING")
+
+    return False
+
 def solve_recaptcha_with_2captcha(driver, page_url, use_api_login=True):
     """
     Solve reCAPTCHA using 2captcha service
@@ -290,11 +459,11 @@ def solve_recaptcha_with_2captcha(driver, page_url, use_api_login=True):
                     }}
                 """)
 
-                # Try multiple ways to submit the form
-                print("Attempting to submit form after captcha...")
+                # Use the robust submit function
+                print("Submitting form after CAPTCHA solution...")
                 try:
-                    # Method 1: Try to find and execute callback
-                    driver.execute_script("""
+                    # First, try to execute any reCAPTCHA callbacks
+                    callback_executed = driver.execute_script("""
                         var callback = window.recaptchaCallback || window.onRecaptchaSuccess;
                         if (callback && typeof callback === 'function') {
                             callback();
@@ -302,37 +471,24 @@ def solve_recaptcha_with_2captcha(driver, page_url, use_api_login=True):
                         }
                         return false;
                     """)
+                    if callback_executed:
+                        print("  ✓ reCAPTCHA callback executed")
 
-                    # Method 2: Close/remove any reCAPTCHA overlays
-                    print("Removing reCAPTCHA overlays...")
-                    driver.execute_script("""
-                        // Remove the reCAPTCHA overlay/backdrop
-                        var overlays = document.querySelectorAll('div[style*="z-index: 2000000000"]');
-                        overlays.forEach(function(el) { el.remove(); });
+                    # Now use the robust submit function
+                    submit_success = submit_form_after_captcha(driver, page_url, form_context="login")
 
-                        // Try to close reCAPTCHA iframe
-                        var iframes = document.querySelectorAll('iframe[src*="recaptcha"]');
-                        iframes.forEach(function(iframe) {
-                            if (iframe.style.width === '100%' || iframe.style.height === '100%') {
-                                iframe.style.display = 'none';
-                            }
-                        });
-                    """)
+                    if submit_success:
+                        print("✓ Form submitted successfully after CAPTCHA")
+                    else:
+                        print("⚠️ Form submission may have failed, check logs")
 
-                    # Method 3: Try to click the submit button using JavaScript (bypasses overlay)
-                    time.sleep(2)
-                    print("Clicking submit button via JavaScript...")
-                    driver.execute_script("""
-                        var submitBtn = document.getElementById('submit');
-                        if (submitBtn) {
-                            submitBtn.click();
-                        }
-                    """)
-                    print("✓ Form resubmitted after captcha")
                 except Exception as e:
-                    print(f"Note: Could not resubmit form: {e}")
+                    print(f"⚠️ Error during form submission: {e}")
+                    import traceback
+                    traceback.print_exc()
 
-                time.sleep(5)
+                # Give it time to process
+                time.sleep(3)
                 return (True, None)  # Success but no JWT token yet (will be extracted later)
 
             elif result.get('request') == 'CAPCHA_NOT_READY':
