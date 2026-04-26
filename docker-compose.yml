@@ -67,7 +67,8 @@ services:
 
     networks:
       - zazy-network
-      - iptv_network
+      - iptvprovider_iptv_network
+      - dokploy-network
 
     # Health check
     healthcheck:
@@ -90,5 +91,5 @@ volumes:
 networks:
   zazy-network:
     driver: bridge
-  iptv_network:
+  iptvprovider_iptv_network:
     external: true
