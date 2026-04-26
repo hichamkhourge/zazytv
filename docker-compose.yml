@@ -90,5 +90,5 @@ volumes:
 networks:
   zazy-network:
     driver: bridge
-  dokploy-network:
+  iptv_network:
     external: true
