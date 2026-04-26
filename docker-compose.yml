@@ -7,9 +7,14 @@ services:
       dockerfile: Dockerfile
     container_name: zazy-automation
     restart: unless-stopped
+    ports:
+      - "5000:5000"
     environment:
       # 2captcha Configuration
       - TWOCAPTCHA_API_KEY=${TWOCAPTCHA_API_KEY}
+
+      # Automation API Key (shared with iptvProvider)
+      - AUTOMATION_API_KEY=${AUTOMATION_API_KEY}
 
       # URLs
       - BASE_URL=${BASE_URL:-https://zazyhost.com}
@@ -62,6 +67,7 @@ services:
 
     networks:
       - zazy-network
+      - dokploy-network
 
     # Health check
     healthcheck:
@@ -84,3 +90,5 @@ volumes:
 networks:
   zazy-network:
     driver: bridge
+  dokploy-network:
+    external: true

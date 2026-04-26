@@ -52,6 +52,7 @@ COPY zazy_playlist_automation.py .
 COPY ugeen_api_scraper.py .
 COPY telegram_notifier.py .
 COPY .env.example .
+COPY automation_api/ ./automation_api/
 
 # Create necessary directories
 RUN mkdir -p /app/playlists /app/ugeen_sessions /app/ugeen_data /var/log

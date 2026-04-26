@@ -71,5 +71,21 @@ echo "  To access playlists: docker cp zazy-automation:/app/playlists ."
 echo "================================================"
 echo ""
 
+# Start the Automation API (FastAPI/Uvicorn) in the background
+echo "[*] Starting Automation API on port 5000..."
+uvicorn automation_api.main:app --host 0.0.0.0 --port 5000 \
+    --log-level info \
+    >> /var/log/api.log 2>&1 &
+API_PID=$!
+sleep 2
+
+if ps -p $API_PID > /dev/null 2>&1; then
+    echo "[✓] Automation API started (PID: $API_PID)"
+else
+    echo "[!] WARNING: Automation API failed to start. Check /var/log/api.log"
+fi
+echo ""
+
 # Execute the command passed to the entrypoint (usually "cron -f")
 exec "$@"
+
