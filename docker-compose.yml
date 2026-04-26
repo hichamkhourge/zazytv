@@ -67,7 +67,7 @@ services:
 
     networks:
       - zazy-network
-      - dokploy-network
+      - iptv_network
 
     # Health check
     healthcheck:
