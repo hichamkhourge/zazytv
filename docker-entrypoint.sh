@@ -72,8 +72,8 @@ echo "================================================"
 echo ""
 
 # Start the Automation API (FastAPI/Uvicorn) in the background
-echo "[*] Starting Automation API on port 5000..."
-uvicorn automation_api.main:app --host 0.0.0.0 --port 5000 \
+echo "[*] Starting Automation API on port 5005..."
+uvicorn automation_api.main:app --host 0.0.0.0 --port 5005 \
     --log-level info \
     >> /var/log/api.log 2>&1 &
 API_PID=$!

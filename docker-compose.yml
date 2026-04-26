@@ -8,7 +8,7 @@ services:
     container_name: zazy-automation
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "5005:5005"
     environment:
       # 2captcha Configuration
       - TWOCAPTCHA_API_KEY=${TWOCAPTCHA_API_KEY}
