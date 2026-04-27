@@ -17,6 +17,7 @@ import random
 import string
 import json
 import requests
+import argparse
 from datetime import datetime
 from dotenv import load_dotenv
 from twocaptcha import TwoCaptcha
@@ -1254,8 +1255,147 @@ def download_m3u_file(host, username, password, output_filename=None):
         return (False, None)
 
 
-def main():
+def send_webhook_callback(callback_url, user_id, status, username=None, password=None, host=None, m3u_url=None, error=None, max_retries=3):
+    """
+    Send webhook callback to Laravel application with automation results.
+
+    Args:
+        callback_url: The webhook URL to POST to
+        user_id: Laravel IPTV account ID
+        status: 'success' or 'failed'
+        username: Xtream username (if success)
+        password: Xtream password (if success)
+        host: Xtream host URL (if success)
+        m3u_url: M3U playlist URL (if success)
+        error: Error message (if failed)
+        max_retries: Maximum number of retry attempts (default: 3)
+
+    Returns:
+        True if callback succeeded, False otherwise
+    """
+    if not callback_url:
+        print("[*] No callback URL provided, skipping webhook")
+        return False
+
+    print(f"\n[*] Sending webhook callback to {callback_url}...")
+
+    # Prepare the payload
+    payload = {
+        'user_id': user_id,
+        'status': status,
+        'timestamp': datetime.now().isoformat()
+    }
+
+    if status == 'success':
+        payload.update({
+            'username': username,
+            'password': password,
+            'host': host or IBOPLAYER_PLAYLIST_URL,
+            'm3u_url': m3u_url
+        })
+    else:
+        payload['error'] = error
+
+    # Get auth token from environment
+    webhook_token = os.getenv('WEBHOOK_AUTH_TOKEN', '')
+
+    headers = {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Zazy-Automation/1.0'
+    }
+
+    if webhook_token:
+        headers['Authorization'] = f'Bearer {webhook_token}'
+
+    print(f"[*] Payload: {json.dumps({**payload, 'password': '***' if password else None}, indent=2)}")
+
+    # Retry loop with exponential backoff
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"\n[*] Attempt {attempt}/{max_retries}: Sending webhook...")
+
+            response = requests.post(
+                callback_url,
+                json=payload,
+                headers=headers,
+                timeout=30
+            )
+
+            print(f"[*] Response status code: {response.status_code}")
+
+            if response.status_code in [200, 201, 202]:
+                print("[✓] Webhook sent successfully!")
+                try:
+                    response_data = response.json()
+                    print(f"[*] Response: {json.dumps(response_data, indent=2)}")
+                except:
+                    print(f"[*] Response text: {response.text}")
+                return True
+
+            elif response.status_code >= 400 and response.status_code < 500:
+                # Client error - don't retry
+                print(f"[!] Client error ({response.status_code}): {response.text}")
+                print("[!] This is likely a configuration issue. Please check your webhook settings.")
+                return False
+
+            else:
+                # Server error or other - retry
+                print(f"[!] Server error ({response.status_code}): {response.text}")
+
+                if attempt < max_retries:
+                    wait_time = 2 ** attempt
+                    print(f"[*] Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    print("[!] Max retries reached. Could not send webhook.")
+                    return False
+
+        except requests.exceptions.Timeout:
+            print(f"[!] Request timed out (attempt {attempt}/{max_retries})")
+            if attempt < max_retries:
+                wait_time = 2 ** attempt
+                print(f"[*] Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                print("[!] Max retries reached. Request timed out.")
+                return False
+
+        except requests.exceptions.RequestException as e:
+            print(f"[!] Request failed (attempt {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
+                wait_time = 2 ** attempt
+                print(f"[*] Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                print("[!] Max retries reached. Request failed.")
+                return False
+
+        except Exception as e:
+            print(f"[!] Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    return False
+
+
+def main(user_id=None, callback_url=None):
+    """
+    Main automation function.
+
+    Args:
+        user_id: Optional Laravel IPTV account ID
+        callback_url: Optional callback URL for webhook notification
+    """
     driver = get_driver()
+
+    # Track whether we're in Laravel integration mode
+    is_laravel_mode = bool(user_id and callback_url)
+
+    print(f"\n[*] Starting automation...")
+    print(f"[*] User ID: {user_id if user_id else 'N/A (standalone mode)'}")
+    print(f"[*] Callback URL: {callback_url if callback_url else 'N/A'}")
+    print(f"[*] Laravel integration mode: {is_laravel_mode}")
 
     try:
         navigate_and_add_free_trial(driver)
@@ -1279,31 +1419,69 @@ def main():
 
             # Save playlist to IBO Player if credentials are available
             if username and password:
-                print("\n[*] Attempting to save playlist to IBO Player...")
-                ibo_success = save_to_iboplayer(username, password)
+                # Laravel integration mode: send webhook instead of IBO Player
+                if is_laravel_mode:
+                    print("\n[*] Laravel integration mode: Sending webhook callback...")
+                    webhook_success = send_webhook_callback(
+                        callback_url=callback_url,
+                        user_id=user_id,
+                        status='success',
+                        username=username,
+                        password=password,
+                        host=IBOPLAYER_PLAYLIST_URL,
+                        m3u_url=m3u_url
+                    )
 
-                if ibo_success:
-                    print("\n[✓] Playlist successfully saved to IBO Player!")
+                    if webhook_success:
+                        print("[✓] Webhook sent successfully! Laravel will handle the rest.")
+                    else:
+                        print("[!] Webhook failed. Check the logs above for details.")
+
+                # Standalone mode: use IBO Player (original behavior)
                 else:
-                    print("\n[!] Failed to save playlist to IBO Player. Check the logs above for details.")
+                    print("\n[*] Standalone mode: Attempting to save playlist to IBO Player...")
+                    ibo_success = save_to_iboplayer(username, password)
 
-                # Download M3U playlist file
-                download_success, m3u_file_path = download_m3u_file(
-                    IBOPLAYER_PLAYLIST_URL,
-                    username,
-                    password
-                )
+                    if ibo_success:
+                        print("\n[✓] Playlist successfully saved to IBO Player!")
+                    else:
+                        print("\n[!] Failed to save playlist to IBO Player. Check the logs above for details.")
 
-                if download_success:
-                    print(f"\n[✓] M3U playlist file downloaded successfully to: {m3u_file_path}")
-                else:
-                    print("\n[!] Failed to download M3U playlist file. Check the logs above for details.")
+                    # Download M3U playlist file
+                    download_success, m3u_file_path = download_m3u_file(
+                        IBOPLAYER_PLAYLIST_URL,
+                        username,
+                        password
+                    )
+
+                    if download_success:
+                        print(f"\n[✓] M3U playlist file downloaded successfully to: {m3u_file_path}")
+                    else:
+                        print("\n[!] Failed to download M3U playlist file. Check the logs above for details.")
             else:
-                print("\n[!] Could not save to IBO Player: username or password not found.")
-                print("[*] Username and password are required for the IBO Player API.")
+                error_msg = "Could not extract username or password from service details"
+                print(f"\n[!] {error_msg}")
+
+                # Send error callback if in Laravel mode
+                if is_laravel_mode:
+                    send_webhook_callback(
+                        callback_url=callback_url,
+                        user_id=user_id,
+                        status='failed',
+                        error=error_msg
+                    )
         else:
-            print("\n[!] Could not retrieve M3U Playlist URL automatically.")
-            print("[*] You may need to navigate manually to the service details.")
+            error_msg = "Could not retrieve M3U Playlist URL automatically"
+            print(f"\n[!] {error_msg}")
+
+            # Send error callback if in Laravel mode
+            if is_laravel_mode:
+                send_webhook_callback(
+                    callback_url=callback_url,
+                    user_id=user_id,
+                    status='failed',
+                    error=error_msg
+                )
 
         print("\n[✓] Automation complete!")
 
@@ -1316,8 +1494,8 @@ def main():
             except Exception as e:
                 print(f"[!] Could not retrieve 2captcha balance: {e}")
 
-        # Send completion success notification
-        if m3u_url:
+        # Send completion success notification (only in standalone mode)
+        if m3u_url and not is_laravel_mode:
             notifier.notify_success(m3u_url, username, captcha_balance)
 
         # Check if we should keep browser open or exit
@@ -1352,8 +1530,17 @@ def main():
             except Exception as balance_error:
                 print(f"[!] Could not retrieve 2captcha balance: {balance_error}")
 
-        # Send error notification
-        notifier.notify_error(str(e), error_traceback, captcha_balance)
+        # Send webhook error callback if in Laravel mode
+        if is_laravel_mode:
+            send_webhook_callback(
+                callback_url=callback_url,
+                user_id=user_id,
+                status='failed',
+                error=f"{str(e)}\n\n{error_traceback}"
+            )
+        else:
+            # Send Telegram error notification (only in standalone mode)
+            notifier.notify_error(str(e), error_traceback, captcha_balance)
 
         # Always quit driver on error
         try:
@@ -1367,4 +1554,33 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description='Zazy TV - Automated Playlist Creation',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Standalone mode (IBO Player integration)
+  python zazy_playlist_automation.py
+
+  # Laravel integration mode
+  python zazy_playlist_automation.py --user-id 123 --callback-url https://app.com/api/webhooks/zazy-automation
+        """
+    )
+
+    parser.add_argument(
+        '--user-id',
+        type=int,
+        help='Laravel IPTV account ID (enables Laravel integration mode)'
+    )
+
+    parser.add_argument(
+        '--callback-url',
+        type=str,
+        help='Webhook callback URL to send results to'
+    )
+
+    args = parser.parse_args()
+
+    # Run main function with parsed arguments
+    main(user_id=args.user_id, callback_url=args.callback_url)

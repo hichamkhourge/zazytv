@@ -42,15 +42,17 @@ ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
 WORKDIR /app
 
 # Copy requirements first for better caching
-COPY requirements.txt .
+COPY requirements.txt requirements_api.txt ./
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -r requirements_api.txt
 
 # Copy application files
 COPY zazy_playlist_automation.py .
 COPY ugeen_api_scraper.py .
 COPY telegram_notifier.py .
+COPY api_server.py .
 COPY .env.example .
 COPY automation_api/ ./automation_api/
 
@@ -72,6 +74,9 @@ RUN touch /var/log/cron.log
 # Copy entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Expose ports (8899 for Flask API, 5005 for FastAPI)
+EXPOSE 8899 5005
 
 # Volumes for data persistence
 VOLUME ["/app/playlists", "/app/ugeen_sessions", "/app/ugeen_data"]

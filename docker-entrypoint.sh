@@ -86,6 +86,25 @@ else
 fi
 echo ""
 
+# Start the Flask API (for Laravel integration) in the background
+echo "[*] Starting Flask API on port 8899..."
+gunicorn --bind 0.0.0.0:8899 \
+    --workers 2 \
+    --threads 4 \
+    --timeout 900 \
+    --access-logfile /var/log/flask-access.log \
+    --error-logfile /var/log/flask-error.log \
+    api_server:app &
+FLASK_PID=$!
+sleep 2
+
+if ps -p $FLASK_PID > /dev/null 2>&1; then
+    echo "[✓] Flask API started (PID: $FLASK_PID)"
+else
+    echo "[!] WARNING: Flask API failed to start. Check /var/log/flask-error.log"
+fi
+echo ""
+
 # Execute the command passed to the entrypoint (usually "cron -f")
 exec "$@"
 
