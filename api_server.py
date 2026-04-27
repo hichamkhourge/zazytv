@@ -25,11 +25,20 @@ SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "zazy_playlist_automation.
 def verify_api_key():
     """Verify the API key from request headers."""
     auth_header = request.headers.get('Authorization')
+
+    print(f"[DEBUG] Authorization header received: {auth_header[:20] if auth_header else 'None'}...")
+    print(f"[DEBUG] Expected API_KEY (first 20 chars): {API_KEY[:20] if API_KEY else 'None'}...")
+
     if not auth_header:
+        print("[DEBUG] No Authorization header provided")
         return False
 
     # Support both "Bearer TOKEN" and "TOKEN" formats
     token = auth_header.replace('Bearer ', '').strip()
+
+    print(f"[DEBUG] Extracted token (first 20 chars): {token[:20]}...")
+    print(f"[DEBUG] Tokens match: {token == API_KEY}")
+
     return token == API_KEY
 
 
