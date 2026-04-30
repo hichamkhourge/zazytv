@@ -13,6 +13,8 @@ import random
 import os
 import sys
 import traceback
+import argparse
+import threading
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -25,12 +27,25 @@ from selenium.webdriver.support import expected_conditions as EC
 # Load environment variables
 load_dotenv()
 
-# Configuration from environment variables
-UGEEN_EMAIL = os.getenv('UGEEN_EMAIL', '')
-UGEEN_PASSWORD = os.getenv('UGEEN_PASSWORD', '')
+# Parse CLI arguments (if running from Flask API)
+parser = argparse.ArgumentParser(description='Ugeen account automation (renewal)')
+parser.add_argument('--user-id', type=int, help='IPTV account ID')
+parser.add_argument('--username', type=str, help='Ugeen master account username (overrides env)')
+parser.add_argument('--password', type=str, help='Ugeen master account password (overrides env)')
+parser.add_argument('--callback-url', type=str, help='Webhook URL to send progress/results')
+args, unknown = parser.parse_known_args()
+
+# Configuration from environment variables (with CLI override)
+UGEEN_EMAIL = args.username if args.username else os.getenv('UGEEN_EMAIL', '')
+UGEEN_PASSWORD = args.password if args.password else os.getenv('UGEEN_PASSWORD', '')
 UGEEN_URL = os.getenv('UGEEN_URL', 'http://ugeen.live')
 UGEEN_PACKAGE_ID = os.getenv('UGEEN_PACKAGE_ID', '384')
 TWOCAPTCHA_API_KEY = os.getenv('TWOCAPTCHA_API_KEY', '')
+
+# Webhook configuration
+CALLBACK_URL = args.callback_url
+USER_ID = args.user_id
+WEBHOOK_AUTH_TOKEN = os.getenv('WEBHOOK_AUTH_TOKEN', '')
 
 # UGEEN-specific settings
 UGEEN_HEADLESS = os.getenv('UGEEN_HEADLESS', 'True').lower() == 'true'
@@ -71,6 +86,142 @@ def notify_telegram(status: str, message: str, details: str = None):
         full_message = f"🔧 <b>UGEEN Scraper</b>\n\n<b>{status}</b>\n{message}"
         telegram.send_notification(status, message, details)
     return None
+
+def send_webhook_success(user_id, callback_url):
+    """Send success webhook to Laravel (renewal completed)"""
+    if not callback_url or not user_id:
+        return False
+
+    payload = {
+        'user_id': user_id,
+        'status': 'success',
+        'timestamp': datetime.utcnow().isoformat() + 'Z'
+    }
+
+    headers = {
+        'Authorization': f'Bearer {WEBHOOK_AUTH_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+
+    try:
+        log_message(f"Sending success webhook to {callback_url}", "INFO")
+        response = requests.post(callback_url, json=payload, headers=headers, timeout=30)
+        log_message(f"Webhook response: {response.status_code}", "INFO")
+        return response.status_code == 200
+    except Exception as e:
+        log_message(f"Failed to send success webhook: {e}", "ERROR")
+        return False
+
+def send_webhook_failure(user_id, callback_url, error_message):
+    """Send failure webhook to Laravel"""
+    if not callback_url or not user_id:
+        return False
+
+    payload = {
+        'user_id': user_id,
+        'status': 'failed',
+        'error': error_message,
+        'timestamp': datetime.utcnow().isoformat() + 'Z'
+    }
+
+    headers = {
+        'Authorization': f'Bearer {WEBHOOK_AUTH_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+
+    try:
+        log_message(f"Sending failure webhook to {callback_url}", "ERROR")
+        response = requests.post(callback_url, json=payload, headers=headers, timeout=30)
+        log_message(f"Failure webhook response: {response.status_code}", "INFO")
+        return response.status_code == 200
+    except Exception as e:
+        log_message(f"Failed to send failure webhook: {e}", "ERROR")
+        return False
+
+def send_webhook_progress(user_id, callback_url, message, progress):
+    """Send progress update webhook to Laravel"""
+    if not callback_url or not user_id:
+        return False
+
+    payload = {
+        'user_id': user_id,
+        'status': 'in_progress',
+        'message': message,
+        'progress': progress,
+        'timestamp': datetime.utcnow().isoformat() + 'Z'
+    }
+
+    headers = {
+        'Authorization': f'Bearer {WEBHOOK_AUTH_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+
+    try:
+        response = requests.post(callback_url, json=payload, headers=headers, timeout=10)
+        return response.status_code == 200
+    except Exception as e:
+        # Don't log progress webhook failures to avoid spam
+        return False
+
+# Global variable to track current progress step
+current_progress_step = 0
+progress_lock = threading.Lock()
+
+def set_progress_step(step):
+    """Thread-safe way to update progress step"""
+    global current_progress_step
+    with progress_lock:
+        current_progress_step = step
+
+def progress_reporter(user_id, callback_url, stop_event):
+    """
+    Background thread that sends detailed progress updates every 10 seconds.
+    Runs until stop_event is set.
+    """
+    # Detailed progress milestones
+    progress_steps = [
+        (5, "Initializing automation script"),
+        (10, "Checking for existing session"),
+        (15, "Loading authentication system"),
+        (20, "Navigating to login page"),
+        (25, "Solving CAPTCHA challenge"),
+        (35, "Submitting login credentials"),
+        (45, "Verifying authentication"),
+        (50, "Loading dashboard"),
+        (55, "Navigating to renewal page"),
+        (60, "Requesting activation code"),
+        (70, "Decoding activation token"),
+        (75, "Entering activation code"),
+        (80, "Selecting package option"),
+        (85, "Preparing subscription form"),
+        (90, "Submitting subscription renewal"),
+        (95, "Verifying renewal completion"),
+    ]
+
+    step_index = 0
+
+    while not stop_event.is_set():
+        try:
+            # Send current progress step
+            if step_index < len(progress_steps):
+                progress, message = progress_steps[step_index]
+
+                # Check if we should advance to next step based on global progress
+                with progress_lock:
+                    if current_progress_step > step_index:
+                        step_index = current_progress_step
+                        if step_index < len(progress_steps):
+                            progress, message = progress_steps[step_index]
+
+                send_webhook_progress(user_id, callback_url, message, progress)
+                step_index += 1
+
+            # Wait 10 seconds or until stopped
+            stop_event.wait(10)
+
+        except Exception as e:
+            # Silently continue on errors
+            pass
 
 def decode_jwt(token):
     """Decode JWT token without verification"""
@@ -1184,13 +1335,19 @@ def perform_login_with_retries(driver, wait, config, retry_count=0):
 def scrape_with_api_auth(proxy=None):
     # Validate configuration
     if not UGEEN_EMAIL or not UGEEN_PASSWORD:
-        log_message("UGEEN_EMAIL and UGEEN_PASSWORD must be set in environment", "ERROR")
+        error_msg = "UGEEN_EMAIL and UGEEN_PASSWORD must be set in environment"
+        log_message(error_msg, "ERROR")
         notify_telegram("❌ ERROR", "Missing UGEEN credentials in environment variables")
+        if CALLBACK_URL and USER_ID:
+            send_webhook_failure(USER_ID, CALLBACK_URL, error_msg)
         return False
 
     if not TWOCAPTCHA_API_KEY:
-        log_message("TWOCAPTCHA_API_KEY must be set in environment", "ERROR")
+        error_msg = "TWOCAPTCHA_API_KEY must be set in environment"
+        log_message(error_msg, "ERROR")
         notify_telegram("❌ ERROR", "Missing 2captcha API key in environment variables")
+        if CALLBACK_URL and USER_ID:
+            send_webhook_failure(USER_ID, CALLBACK_URL, error_msg)
         return False
 
     config = {
@@ -1480,6 +1637,10 @@ def scrape_with_api_auth(proxy=None):
                 f"Email: {UGEEN_EMAIL}\nPackage: {UGEEN_PACKAGE_ID}\nCode: {activation_code}"
             )
 
+            # Send success webhook to Laravel
+            if CALLBACK_URL and USER_ID:
+                send_webhook_success(USER_ID, CALLBACK_URL)
+
             driver.quit()
             return True
         else:
@@ -1520,15 +1681,34 @@ def scrape_with_api_auth(proxy=None):
             error_trace[-500:]
         )
 
+        # Send failure webhook to Laravel
+        if CALLBACK_URL and USER_ID:
+            send_webhook_failure(USER_ID, CALLBACK_URL, str(e))
+
         if driver:
             driver.quit()
         return False
 
 def main():
     """Main entry point with proxy support and proper exit codes"""
+    # Start progress reporter thread if webhook callback is configured
+    progress_thread = None
+    stop_event = None
+
     try:
         log_message("UGEEN API Scraper starting", "INFO")
         notify_telegram("🚀 STARTED", "UGEEN scraper automation has begun")
+
+        # Start progress reporter if callback URL is provided
+        if CALLBACK_URL and USER_ID:
+            log_message("Starting progress reporter thread", "INFO")
+            stop_event = threading.Event()
+            progress_thread = threading.Thread(
+                target=progress_reporter,
+                args=(USER_ID, CALLBACK_URL, stop_event),
+                daemon=True
+            )
+            progress_thread.start()
 
         # Optional: Add your proxy here if you have one
         # Format: 'http://username:password@proxy_host:proxy_port'
@@ -1537,17 +1717,37 @@ def main():
 
         success = scrape_with_api_auth(proxy=proxy)
 
+        # Stop progress reporter
+        if stop_event:
+            stop_event.set()
+            if progress_thread:
+                progress_thread.join(timeout=2)
+
         if success:
             log_message("All done! Scraper completed successfully", "SUCCESS")
             sys.exit(0)  # Exit with success code
         else:
             log_message("Scraping failed. Check the errors above.", "ERROR")
             notify_telegram("❌ FAILED", "UGEEN scraper failed to complete")
+
+            # Send failure webhook if not already sent
+            if CALLBACK_URL and USER_ID:
+                send_webhook_failure(USER_ID, CALLBACK_URL, "Scraping failed")
+
             sys.exit(1)  # Exit with error code
 
     except KeyboardInterrupt:
         log_message("Scraper interrupted by user", "WARNING")
         notify_telegram("⚠️ INTERRUPTED", "UGEEN scraper was manually stopped")
+
+        # Stop progress reporter
+        if stop_event:
+            stop_event.set()
+
+        # Send failure webhook
+        if CALLBACK_URL and USER_ID:
+            send_webhook_failure(USER_ID, CALLBACK_URL, "Script interrupted by user")
+
         sys.exit(130)  # Standard exit code for Ctrl+C
 
     except Exception as e:
@@ -1560,6 +1760,15 @@ def main():
             f"Unexpected error: {str(e)}",
             error_trace[-500:]
         )
+
+        # Stop progress reporter
+        if stop_event:
+            stop_event.set()
+
+        # Send failure webhook
+        if CALLBACK_URL and USER_ID:
+            send_webhook_failure(USER_ID, CALLBACK_URL, str(e))
+
         sys.exit(1)
 
 if __name__ == '__main__':

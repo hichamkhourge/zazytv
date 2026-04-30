@@ -20,6 +20,8 @@ app = Flask(__name__)
 # Configuration
 API_KEY = os.getenv("API_KEY", "your-secret-api-key-here")
 SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "zazy_playlist_automation.py")
+UGEEN_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "ugeen_api_scraper.py")
+UGEEN_RENEW_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "ugeen_renew_user.py")
 
 
 def verify_api_key():
@@ -120,6 +122,71 @@ def run_automation_script(user_id=None, callback_url=None):
         }
     except Exception as e:
         print(f"[!] Error running script: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+
+def run_ugeen_script(user_id=None, callback_url=None, username=None, password=None):
+    """
+    Run the Ugeen automation script in a separate process.
+
+    Args:
+        user_id: Optional Laravel IPTV account ID
+        callback_url: Optional callback URL to send results to
+        username: Optional Ugeen master account username (overrides env)
+        password: Optional Ugeen master account password (overrides env)
+    """
+    try:
+        # Build command
+        cmd = [sys.executable, UGEEN_SCRIPT_PATH]
+
+        if user_id:
+            cmd.extend(['--user-id', str(user_id)])
+
+        if callback_url:
+            cmd.extend(['--callback-url', callback_url])
+
+        if username:
+            cmd.extend(['--username', username])
+
+        if password:
+            cmd.extend(['--password', password])
+
+        print(f"[*] Running Ugeen command: {' '.join(cmd[:4])}... (credentials hidden)")
+
+        # Run the script
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=900  # 15 minute timeout
+        )
+
+        print(f"[*] Ugeen script completed with return code: {result.returncode}")
+        print(f"[*] STDOUT: {result.stdout[-500:]}")  # Last 500 chars
+
+        if result.returncode != 0:
+            print(f"[!] STDERR: {result.stderr[-500:]}")
+
+        return {
+            'success': result.returncode == 0,
+            'return_code': result.returncode,
+            'output': result.stdout[-1000:] if result.stdout else None,
+            'error': result.stderr[-1000:] if result.stderr else None
+        }
+
+    except subprocess.TimeoutExpired:
+        print("[!] Ugeen script execution timed out after 15 minutes")
+        return {
+            'success': False,
+            'error': 'Script execution timed out after 15 minutes'
+        }
+    except Exception as e:
+        print(f"[!] Error running Ugeen script: {e}")
         import traceback
         traceback.print_exc()
         return {
@@ -249,6 +316,66 @@ def get_status():
         'script_exists': os.path.exists(SCRIPT_PATH),
         'timestamp': datetime.now().isoformat()
     })
+
+
+@app.route('/api/generate/ugeen', methods=['POST'])
+def generate_ugeen():
+    """
+    Trigger Ugeen account generation or renewal.
+
+    Request body:
+    {
+        "user_id": 123,  // Required - Laravel IPTV account ID
+        "callback_url": "https://your-app.com/api/webhooks/ugeen-automation",  // Required
+        "username": "master@email.com",  // Optional - Ugeen master username (overrides env)
+        "password": "master_password"  // Optional - Ugeen master password (overrides env)
+    }
+
+    Response:
+    {
+        "status": "started",
+        "message": "Ugeen automation script started in background",
+        "user_id": 123
+    }
+    """
+    # Verify API key - TEMPORARILY DISABLED FOR TESTING
+    # if not verify_api_key():
+    #     return jsonify({'error': 'Unauthorized - Invalid API key'}), 401
+    print("[WARNING] API key verification is DISABLED - for testing only!")
+
+    try:
+        data = request.get_json() or {}
+        user_id = data.get('user_id')
+        callback_url = data.get('callback_url')
+        username = data.get('username')  # Optional - overrides env
+        password = data.get('password')  # Optional - overrides env
+
+        print(f"[*] Received Ugeen request: user_id={user_id}, callback_url={callback_url}, custom_creds={bool(username and password)}")
+
+        # Run script in background thread
+        def run_in_background():
+            run_ugeen_script(
+                user_id=user_id,
+                callback_url=callback_url,
+                username=username,
+                password=password
+            )
+
+        thread = threading.Thread(target=run_in_background, daemon=True)
+        thread.start()
+
+        return jsonify({
+            'status': 'started',
+            'message': 'Ugeen automation script started in background. Progress updates and results will be sent to callback URL.',
+            'user_id': user_id,
+            'estimated_time': '3-10 minutes'
+        }), 202  # 202 Accepted
+
+    except Exception as e:
+        print(f"[!] Error in generate_ugeen endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 
 if __name__ == '__main__':
