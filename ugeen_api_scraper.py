@@ -1678,91 +1678,118 @@ def scrape_with_api_auth(proxy=None):
         if any(success_indicators):
             log_message("SUCCESS! Subscription Activated!", "SUCCESS")
 
-            # Extract Xtream credentials from dashboard
-            log_message("Extracting Xtream credentials from dashboard...", "INFO")
+            # Extract Xtream credentials from subscription page
+            log_message("Extracting Xtream credentials from subscription page...", "INFO")
             xtream_username = None
             xtream_password = None
 
             try:
-                # Navigate to dashboard if not already there
-                if 'dashboard' not in current_url.lower():
-                    log_message("Navigating to dashboard...", "INFO")
-                    driver.get(f'{UGEEN_URL}/dashboard.html')
-                    time.sleep(3)
+                # Navigate to subscription page
+                if 'subscription' not in current_url.lower():
+                    log_message("Navigating to subscription page...", "INFO")
+                    driver.get(f'{UGEEN_URL}/subscription.html')
+                    time.sleep(5)  # Wait for page load
 
-                # Extract credentials from page
-                # Try multiple selectors for username
-                username_selectors = [
-                    '#xtream_username',
-                    'input[name="username"]',
-                    '.xtream-username',
-                    'input[placeholder*="username" i]',
-                    'span.username',
-                    'div.username',
-                ]
+                # Wait for JavaScript to populate credentials (retry up to 3 times)
+                for attempt in range(3):
+                    log_message(f"Credential extraction attempt {attempt + 1}/3...", "INFO")
 
-                for selector in username_selectors:
+                    # Save debug HTML and screenshot
                     try:
-                        element = driver.find_element(By.CSS_SELECTOR, selector)
-                        xtream_username = element.get_attribute('value') or element.text
-                        if xtream_username and xtream_username.strip():
-                            log_message(f"Found username via selector: {selector}", "INFO")
+                        with open('/tmp/ugeen_subscription.html', 'w', encoding='utf-8') as f:
+                            f.write(driver.page_source)
+                        driver.save_screenshot('/tmp/ugeen_subscription.png')
+                        log_message("Debug files saved: /tmp/ugeen_subscription.html and .png", "INFO")
+                    except Exception as debug_err:
+                        log_message(f"Could not save debug files: {debug_err}", "WARNING")
+
+                    # Extract credentials from page using correct CSS classes
+                    # Try multiple selectors for username (from actual HTML structure)
+                    username_selectors = [
+                        '.iptv-user',                    # Primary selector
+                        'span.iptv-user',                # Specific tag
+                        '.copy-value.iptv-user',         # Full class combo
+                        'span.copy-value.iptv-user',     # Most specific
+                    ]
+
+                    for selector in username_selectors:
+                        try:
+                            element = driver.find_element(By.CSS_SELECTOR, selector)
+                            xtream_username = element.text.strip()
+                            if xtream_username and xtream_username not in ['', 'ugeen_xxxxxxxx']:
+                                log_message(f"Found username via selector: {selector} -> {xtream_username}", "INFO")
+                                break
+                        except:
+                            continue
+
+                    # Try multiple selectors for password
+                    password_selectors = [
+                        '.iptv-pass',                    # Primary selector
+                        'span.iptv-pass',                # Specific tag
+                        '.copy-value.iptv-pass',         # Full class combo
+                        'span.copy-value.iptv-pass',     # Most specific
+                    ]
+
+                    for selector in password_selectors:
+                        try:
+                            element = driver.find_element(By.CSS_SELECTOR, selector)
+                            xtream_password = element.text.strip()
+                            if xtream_password and xtream_password not in ['', 'xxxxxxxx']:
+                                log_message(f"Found password via selector: {selector} -> {xtream_password[:4]}***", "INFO")
+                                break
+                        except:
+                            continue
+
+                    # Validate extracted credentials
+                    if xtream_username and xtream_password:
+                        # Check if these are real values, not placeholders
+                        if xtream_username.startswith('ugeen_') and xtream_password != 'xxxxxxxx':
+                            log_message("✓ Valid credentials extracted!", "SUCCESS")
                             break
-                    except:
-                        continue
+                        else:
+                            log_message(f"Extracted values appear to be placeholders, retrying...", "WARNING")
+                            log_message(f"  Username: {xtream_username}, starts with ugeen_: {xtream_username.startswith('ugeen_') if xtream_username else False}", "WARNING")
+                            log_message(f"  Password: {'***' if xtream_password else 'None'}, is placeholder: {xtream_password == 'xxxxxxxx' if xtream_password else False}", "WARNING")
+                            xtream_username = None
+                            xtream_password = None
 
-                # Try multiple selectors for password
-                password_selectors = [
-                    '#xtream_password',
-                    'input[name="password"]',
-                    '.xtream-password',
-                    'input[type="password"]',
-                    'span.password',
-                    'div.password',
-                ]
+                    # Wait before retry
+                    if attempt < 2:
+                        time.sleep(3)
 
-                for selector in password_selectors:
-                    try:
-                        element = driver.find_element(By.CSS_SELECTOR, selector)
-                        xtream_password = element.get_attribute('value') or element.text
-                        if xtream_password and xtream_password.strip():
-                            log_message(f"Found password via selector: {selector}", "INFO")
-                            break
-                    except:
-                        continue
-
-                # If not found via selectors, try JavaScript extraction
+                # If still not found, try JavaScript extraction as fallback
                 if not xtream_username or not xtream_password:
-                    log_message("Trying JavaScript extraction...", "INFO")
+                    log_message("Trying JavaScript extraction as fallback...", "INFO")
                     credentials = driver.execute_script("""
-                        // Look for credentials in common locations
-                        var username = null;
-                        var password = null;
+                        // Extract from specific Ugeen CSS classes
+                        var username = document.querySelector('.iptv-user');
+                        var password = document.querySelector('.iptv-pass');
 
-                        // Check for credentials in page text/divs
-                        var allText = document.body.innerText || document.body.textContent;
-
-                        // Try to find username pattern
-                        var usernameMatch = allText.match(/username[:\\s]*([a-zA-Z0-9_\\-@\\.]+)/i);
-                        if (usernameMatch) username = usernameMatch[1];
-
-                        // Try to find password pattern
-                        var passwordMatch = allText.match(/password[:\\s]*([a-zA-Z0-9_\\-@\\.]+)/i);
-                        if (passwordMatch) password = passwordMatch[1];
-
-                        return {username: username, password: password};
+                        return {
+                            username: username ? username.textContent.trim() : null,
+                            password: password ? password.textContent.trim() : null
+                        };
                     """)
 
                     xtream_username = xtream_username or credentials.get('username')
                     xtream_password = xtream_password or credentials.get('password')
 
-                # Log results
+                # Final validation
+                if xtream_username and xtream_password:
+                    # Remove placeholders if still present
+                    if xtream_username == 'ugeen_xxxxxxxx':
+                        xtream_username = None
+                    if xtream_password == 'xxxxxxxx':
+                        xtream_password = None
+
+                # Log final results
                 if xtream_username and xtream_password:
                     log_message(f"✓ Extracted Xtream username: {xtream_username}", "SUCCESS")
                     log_message(f"✓ Extracted Xtream password: {xtream_password[:4]}***", "SUCCESS")
                 else:
-                    log_message("⚠️ Could not extract Xtream credentials from dashboard", "WARNING")
+                    log_message("⚠️ Could not extract Xtream credentials from subscription page", "WARNING")
                     log_message(f"Username found: {bool(xtream_username)}, Password found: {bool(xtream_password)}", "WARNING")
+                    log_message("Please check /tmp/ugeen_subscription.html and .png for debugging", "WARNING")
 
             except Exception as e:
                 log_message(f"Error extracting Xtream credentials: {e}", "ERROR")
