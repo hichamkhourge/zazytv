@@ -1610,21 +1610,59 @@ def scrape_with_api_auth(proxy=None):
             driver.quit()
             return False
 
-        print("✓ Found submit button. Waiting 2 minutes before clicking...")
-        time.sleep(120)  # Wait 2 minutes before clicking the last button
+        print("✓ Found submit button. Waiting 30 seconds before clicking...")
+        time.sleep(30)  # Wait before clicking (reduced from 120s to prevent token expiration)
 
         print("Clicking submit button...")
         submit_button.click()
 
         # Wait for submission to complete
         print("Waiting for submission to complete...")
-        time.sleep(5)
+        time.sleep(10)  # Increased from 5s to allow AJAX to complete
 
-        # Check for success message or redirect
+        # Capture current state for debugging
         current_url = driver.current_url
-        page_source = driver.page_source.lower()
+        page_source = driver.page_source
+        page_source_lower = page_source.lower()
 
-        if 'success' in page_source or 'activated' in page_source or 'dashboard' in current_url:
+        # Debug output
+        log_message(f"After submit - URL: {current_url}", "INFO")
+        log_message(f"After submit - Page title: {driver.title}", "INFO")
+        log_message(f"After submit - Source length: {len(page_source)} chars", "INFO")
+
+        # Save debug files
+        try:
+            with open('/tmp/ugeen_after_submit.html', 'w', encoding='utf-8') as f:
+                f.write(page_source)
+            log_message("Page source saved to /tmp/ugeen_after_submit.html", "INFO")
+
+            driver.save_screenshot('/tmp/ugeen_after_submit.png')
+            log_message("Screenshot saved to /tmp/ugeen_after_submit.png", "INFO")
+        except Exception as e:
+            log_message(f"Could not save debug files: {e}", "WARNING")
+
+        # Check for error messages first
+        error_keywords = ['error', 'invalid', 'expired', 'failed', 'خطأ']  # Last one is Arabic for 'error'
+        found_errors = []
+        for keyword in error_keywords:
+            if keyword in page_source_lower:
+                found_errors.append(keyword)
+
+        if found_errors:
+            log_message(f"Found error keywords on page: {', '.join(found_errors)}", "ERROR")
+
+        # Improved success detection - check multiple indicators
+        success_indicators = [
+            'success' in page_source_lower,
+            'activated' in page_source_lower,
+            'dashboard' in current_url,
+            'تم التفعيل' in page_source,  # Arabic: "activated"
+            'نجح' in page_source,  # Arabic: "success"
+            'account renewed' in page_source_lower,
+            'subscription renewed' in page_source_lower,
+        ]
+
+        if any(success_indicators):
             log_message("SUCCESS! Subscription Activated!", "SUCCESS")
 
             # Extract Xtream credentials from dashboard
