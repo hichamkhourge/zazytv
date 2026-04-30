@@ -61,9 +61,14 @@ SUBMIT_MAX_RETRIES = int(os.getenv('SUBMIT_MAX_RETRIES', '3'))  # Number of subm
 Path(UGEEN_SESSION_DIR).mkdir(parents=True, exist_ok=True)
 Path(UGEEN_DATA_DIR).mkdir(parents=True, exist_ok=True)
 
-# Session file path
-SESSION_FILE = os.path.join(UGEEN_SESSION_DIR, 'ugeen_session.json')
+# Session management
 MAX_LOGIN_RETRIES = 5
+
+def get_session_file_path(email):
+    """Get session file path specific to this email to prevent conflicts between accounts"""
+    # Sanitize email for filename (replace @ and . with _)
+    safe_email = email.replace('@', '_').replace('.', '_').replace('/', '_')
+    return os.path.join(UGEEN_SESSION_DIR, f'ugeen_session_{safe_email}.json')
 
 # Import Telegram notifier
 try:
@@ -917,38 +922,46 @@ def solve_recaptcha_with_2captcha(driver, page_url, use_api_login=True):
         traceback.print_exc()
         return (False, None)
 
-def save_session(cookies, jwt_token):
-    """Save cookies and JWT token for session reuse"""
+def save_session(cookies, jwt_token, email):
+    """Save cookies and JWT token for session reuse (per email address)"""
     try:
+        session_file = get_session_file_path(email)
         session_data = {
             'cookies': cookies,
             'jwt_token': jwt_token,
+            'email': email,  # Store which email this session belongs to
             'timestamp': time.time()
         }
-        with open(SESSION_FILE, 'w') as f:
+        with open(session_file, 'w') as f:
             json.dump(session_data, f)
-        print(f"✓ Session saved to {SESSION_FILE}")
+        print(f"✓ Session saved to {session_file}")
         return True
     except Exception as e:
         print(f"Warning: Could not save session: {e}")
         return False
 
-def load_session():
-    """Load saved session if available and not expired"""
+def load_session(email):
+    """Load saved session if available and not expired (for specific email)"""
     try:
-        if not os.path.exists(SESSION_FILE):
+        session_file = get_session_file_path(email)
+        if not os.path.exists(session_file):
             return None
 
-        with open(SESSION_FILE, 'r') as f:
+        with open(session_file, 'r') as f:
             session_data = json.load(f)
+
+        # Verify this session belongs to the correct email
+        if session_data.get('email') != email:
+            print(f"⚠️ Session email mismatch (expected {email}, got {session_data.get('email')})")
+            return None
 
         # Check if session is less than 24 hours old
         age = time.time() - session_data.get('timestamp', 0)
         if age > 86400:  # 24 hours in seconds
-            print("Session expired (>24 hours old)")
+            print(f"Session expired (>24 hours old)")
             return None
 
-        print(f"✓ Loaded saved session (age: {int(age/3600)} hours)")
+        print(f"✓ Loaded saved session for {email} (age: {int(age/3600)} hours)")
         return session_data
     except Exception as e:
         print(f"Warning: Could not load session: {e}")
@@ -1374,7 +1387,7 @@ def scrape_with_api_auth(proxy=None):
 
     # Try to load existing session first
     print('=== STEP 0: Checking for existing session ===')
-    session = load_session()
+    session = load_session(UGEEN_EMAIL)
     jwt_token = None
 
     if session:
@@ -1407,7 +1420,7 @@ def scrape_with_api_auth(proxy=None):
             cookies = login_result['cookies']
 
             # Save session for future use
-            save_session(cookies, jwt_token)
+            save_session(cookies, jwt_token, UGEEN_EMAIL)
 
             # Clean up browser
             driver.quit()
