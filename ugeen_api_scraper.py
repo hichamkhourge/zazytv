@@ -87,16 +87,26 @@ def notify_telegram(status: str, message: str, details: str = None):
         telegram.send_notification(status, message, details)
     return None
 
-def send_webhook_success(user_id, callback_url):
-    """Send success webhook to Laravel (renewal completed)"""
+def send_webhook_success(user_id, callback_url, xtream_username=None, xtream_password=None):
+    """Send success webhook to Laravel with extracted Xtream credentials"""
     if not callback_url or not user_id:
         return False
 
+    # Always use hardcoded Ugeen host
     payload = {
         'user_id': user_id,
         'status': 'success',
+        'host': 'http://ugeen.live:8080',  # Hardcoded Ugeen Xtream API host
         'timestamp': datetime.utcnow().isoformat() + 'Z'
     }
+
+    # Add extracted credentials if available
+    if xtream_username and xtream_password:
+        payload['username'] = xtream_username
+        payload['password'] = xtream_password
+        log_message(f"Sending webhook with extracted credentials (user: {xtream_username})", "INFO")
+    else:
+        log_message("Sending webhook without credentials (extraction may have failed)", "WARNING")
 
     headers = {
         'Authorization': f'Bearer {WEBHOOK_AUTH_TOKEN}',
@@ -1617,12 +1627,105 @@ def scrape_with_api_auth(proxy=None):
         if 'success' in page_source or 'activated' in page_source or 'dashboard' in current_url:
             log_message("SUCCESS! Subscription Activated!", "SUCCESS")
 
+            # Extract Xtream credentials from dashboard
+            log_message("Extracting Xtream credentials from dashboard...", "INFO")
+            xtream_username = None
+            xtream_password = None
+
+            try:
+                # Navigate to dashboard if not already there
+                if 'dashboard' not in current_url.lower():
+                    log_message("Navigating to dashboard...", "INFO")
+                    driver.get(f'{UGEEN_URL}/dashboard.html')
+                    time.sleep(3)
+
+                # Extract credentials from page
+                # Try multiple selectors for username
+                username_selectors = [
+                    '#xtream_username',
+                    'input[name="username"]',
+                    '.xtream-username',
+                    'input[placeholder*="username" i]',
+                    'span.username',
+                    'div.username',
+                ]
+
+                for selector in username_selectors:
+                    try:
+                        element = driver.find_element(By.CSS_SELECTOR, selector)
+                        xtream_username = element.get_attribute('value') or element.text
+                        if xtream_username and xtream_username.strip():
+                            log_message(f"Found username via selector: {selector}", "INFO")
+                            break
+                    except:
+                        continue
+
+                # Try multiple selectors for password
+                password_selectors = [
+                    '#xtream_password',
+                    'input[name="password"]',
+                    '.xtream-password',
+                    'input[type="password"]',
+                    'span.password',
+                    'div.password',
+                ]
+
+                for selector in password_selectors:
+                    try:
+                        element = driver.find_element(By.CSS_SELECTOR, selector)
+                        xtream_password = element.get_attribute('value') or element.text
+                        if xtream_password and xtream_password.strip():
+                            log_message(f"Found password via selector: {selector}", "INFO")
+                            break
+                    except:
+                        continue
+
+                # If not found via selectors, try JavaScript extraction
+                if not xtream_username or not xtream_password:
+                    log_message("Trying JavaScript extraction...", "INFO")
+                    credentials = driver.execute_script("""
+                        // Look for credentials in common locations
+                        var username = null;
+                        var password = null;
+
+                        // Check for credentials in page text/divs
+                        var allText = document.body.innerText || document.body.textContent;
+
+                        // Try to find username pattern
+                        var usernameMatch = allText.match(/username[:\\s]*([a-zA-Z0-9_\\-@\\.]+)/i);
+                        if (usernameMatch) username = usernameMatch[1];
+
+                        // Try to find password pattern
+                        var passwordMatch = allText.match(/password[:\\s]*([a-zA-Z0-9_\\-@\\.]+)/i);
+                        if (passwordMatch) password = passwordMatch[1];
+
+                        return {username: username, password: password};
+                    """)
+
+                    xtream_username = xtream_username or credentials.get('username')
+                    xtream_password = xtream_password or credentials.get('password')
+
+                # Log results
+                if xtream_username and xtream_password:
+                    log_message(f"✓ Extracted Xtream username: {xtream_username}", "SUCCESS")
+                    log_message(f"✓ Extracted Xtream password: {xtream_password[:4]}***", "SUCCESS")
+                else:
+                    log_message("⚠️ Could not extract Xtream credentials from dashboard", "WARNING")
+                    log_message(f"Username found: {bool(xtream_username)}, Password found: {bool(xtream_password)}", "WARNING")
+
+            except Exception as e:
+                log_message(f"Error extracting Xtream credentials: {e}", "ERROR")
+                import traceback
+                traceback.print_exc()
+
             # Save activation data
             activation_data = {
                 'timestamp': datetime.now().isoformat(),
                 'email': UGEEN_EMAIL,
                 'package_id': UGEEN_PACKAGE_ID,
                 'activation_code': activation_code,
+                'xtream_username': xtream_username,
+                'xtream_password': xtream_password,
                 'status': 'success'
             }
 
@@ -1637,9 +1740,9 @@ def scrape_with_api_auth(proxy=None):
                 f"Email: {UGEEN_EMAIL}\nPackage: {UGEEN_PACKAGE_ID}\nCode: {activation_code}"
             )
 
-            # Send success webhook to Laravel
+            # Send success webhook to Laravel with extracted credentials
             if CALLBACK_URL and USER_ID:
-                send_webhook_success(USER_ID, CALLBACK_URL)
+                send_webhook_success(USER_ID, CALLBACK_URL, xtream_username, xtream_password)
 
             driver.quit()
             return True
