@@ -178,6 +178,33 @@ def send_webhook_progress(user_id, callback_url, message, progress):
         # Don't log progress webhook failures to avoid spam
         return False
 
+def send_webhook_renewal_pending(user_id, callback_url, remaining_minutes):
+    """Send renewal pending webhook to Laravel when renewal is not available yet"""
+    if not callback_url or not user_id:
+        return False
+
+    payload = {
+        'user_id': user_id,
+        'status': 'renewal_pending',
+        'message': f'Renewal not available yet. Retry in {remaining_minutes} minutes.',
+        'renew_remaining_minutes': remaining_minutes,
+        'timestamp': datetime.utcnow().isoformat() + 'Z'
+    }
+
+    headers = {
+        'Authorization': f'Bearer {WEBHOOK_AUTH_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+
+    try:
+        log_message(f"Sending renewal pending webhook to {callback_url} (wait {remaining_minutes} min)", "WARNING")
+        response = requests.post(callback_url, json=payload, headers=headers, timeout=30)
+        log_message(f"Renewal pending webhook response: {response.status_code}", "INFO")
+        return response.status_code == 200
+    except Exception as e:
+        log_message(f"Failed to send renewal pending webhook: {e}", "ERROR")
+        return False
+
 # Global variable to track current progress step
 current_progress_step = 0
 progress_lock = threading.Lock()
@@ -980,6 +1007,48 @@ def verify_session(jwt_token, api_base):
     except:
         return False
 
+def check_renewal_eligibility(jwt_token):
+    """
+    Check if renewal is available via Ugeen API
+
+    Args:
+        jwt_token: JWT authentication token
+
+    Returns:
+        tuple: (can_renew_now: bool, renew_remaining_minutes: int)
+    """
+    try:
+        headers = {
+            'Authorization': f'Bearer {jwt_token}',
+            'Accept': 'application/json',
+        }
+
+        log_message("Checking renewal eligibility via API...", "INFO")
+
+        # Call the overview API
+        response = requests.get(
+            'http://176.123.9.60:3000/v1/users/overview',
+            headers=headers,
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            can_renew = data.get('can_renew_now', False)
+            remaining_minutes = data.get('renew_remaining_minutes', 0)
+
+            log_message(f"Renewal check: can_renew_now={can_renew}, remaining_minutes={remaining_minutes}", "INFO")
+            return (can_renew, remaining_minutes)
+        else:
+            log_message(f"Renewal check failed: HTTP {response.status_code}", "WARNING")
+            # On API error, assume we can proceed (fail open)
+            return (True, 0)
+
+    except Exception as e:
+        log_message(f"Error checking renewal eligibility: {e}", "ERROR")
+        # On exception, assume we can proceed (fail open)
+        return (True, 0)
+
 def perform_api_login(email, password, recaptcha_solution, api_base):
     """
     Perform direct API login - bypasses browser automation issues
@@ -1433,6 +1502,26 @@ def scrape_with_api_auth(proxy=None):
             if driver:
                 driver.quit()
             return False
+
+    # Check if renewal is available before proceeding
+    print('\n=== STEP 1.5: Checking Renewal Eligibility ===')
+    can_renew, remaining_minutes = check_renewal_eligibility(jwt_token)
+
+    if not can_renew:
+        log_message(f"Renewal not available yet. Need to wait {remaining_minutes} minutes.", "WARNING")
+        print(f'\n⏳ Renewal not available - need to wait {remaining_minutes} minutes')
+
+        # Send webhook notification with remaining time
+        if CALLBACK_URL and USER_ID:
+            send_webhook_renewal_pending(USER_ID, CALLBACK_URL, remaining_minutes)
+
+        # Log and terminate gracefully (not an error - just need to retry later)
+        log_message("Terminating - Laravel will retry after remaining minutes", "INFO")
+        notify_telegram("⏳ RENEWAL PENDING", f"Account {UGEEN_EMAIL} cannot renew yet. Retry in {remaining_minutes} minutes.")
+        return True  # Return True since this is not an error condition
+
+    log_message("✓ Renewal is available! Proceeding with renewal process...", "SUCCESS")
+    print('✓ Renewal eligibility confirmed - proceeding...\n')
 
     # Now navigate to renew page and request code via browser
     print('\n=== STEP 2: Requesting Code via Browser ===')
