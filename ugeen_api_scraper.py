@@ -153,7 +153,7 @@ def send_webhook_failure(user_id, callback_url, error_message):
         log_message(f"Failed to send failure webhook: {e}", "ERROR")
         return False
 
-def send_webhook_progress(user_id, callback_url, message, progress):
+def send_webhook_progress(user_id, callback_url, message, progress, extra_data=None):
     """Send progress update webhook to Laravel"""
     if not callback_url or not user_id:
         return False
@@ -166,6 +166,10 @@ def send_webhook_progress(user_id, callback_url, message, progress):
         'timestamp': datetime.utcnow().isoformat() + 'Z'
     }
 
+    # Add extra data if provided
+    if extra_data:
+        payload.update(extra_data)
+
     headers = {
         'Authorization': f'Bearer {WEBHOOK_AUTH_TOKEN}',
         'Content-Type': 'application/json'
@@ -176,33 +180,6 @@ def send_webhook_progress(user_id, callback_url, message, progress):
         return response.status_code == 200
     except Exception as e:
         # Don't log progress webhook failures to avoid spam
-        return False
-
-def send_webhook_renewal_pending(user_id, callback_url, remaining_minutes):
-    """Send renewal pending webhook to Laravel when renewal is not available yet"""
-    if not callback_url or not user_id:
-        return False
-
-    payload = {
-        'user_id': user_id,
-        'status': 'renewal_pending',
-        'message': f'Renewal not available yet. Retry in {remaining_minutes} minutes.',
-        'renew_remaining_minutes': remaining_minutes,
-        'timestamp': datetime.utcnow().isoformat() + 'Z'
-    }
-
-    headers = {
-        'Authorization': f'Bearer {WEBHOOK_AUTH_TOKEN}',
-        'Content-Type': 'application/json'
-    }
-
-    try:
-        log_message(f"Sending renewal pending webhook to {callback_url} (wait {remaining_minutes} min)", "WARNING")
-        response = requests.post(callback_url, json=payload, headers=headers, timeout=30)
-        log_message(f"Renewal pending webhook response: {response.status_code}", "INFO")
-        return response.status_code == 200
-    except Exception as e:
-        log_message(f"Failed to send renewal pending webhook: {e}", "ERROR")
         return False
 
 # Global variable to track current progress step
@@ -1511,9 +1488,15 @@ def scrape_with_api_auth(proxy=None):
         log_message(f"Renewal not available yet. Need to wait {remaining_minutes} minutes.", "WARNING")
         print(f'\n⏳ Renewal not available - need to wait {remaining_minutes} minutes')
 
-        # Send webhook notification with remaining time
+        # Send progress webhook with remaining time
         if CALLBACK_URL and USER_ID:
-            send_webhook_renewal_pending(USER_ID, CALLBACK_URL, remaining_minutes)
+            send_webhook_progress(
+                USER_ID,
+                CALLBACK_URL,
+                f"Renewal not available. Retry in {remaining_minutes} minutes.",
+                20,  # Progress percentage for pending state
+                extra_data={'renew_remaining_minutes': remaining_minutes}
+            )
 
         # Log and terminate gracefully (not an error - just need to retry later)
         log_message("Terminating - Laravel will retry after remaining minutes", "INFO")
