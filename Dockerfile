@@ -50,6 +50,7 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 
 # Copy application files
 COPY zazy_playlist_automation.py .
+COPY layerseven_automation.py .
 COPY ugeen_api_scraper.py .
 COPY telegram_notifier.py .
 COPY api_server.py .
@@ -86,3 +87,4 @@ ENTRYPOINT ["docker-entrypoint.sh"]
 
 # Default command
 CMD ["cron", "-f"]
+

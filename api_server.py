@@ -22,6 +22,7 @@ API_KEY = os.getenv("API_KEY", "your-secret-api-key-here")
 SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "zazy_playlist_automation.py")
 UGEEN_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "ugeen_api_scraper.py")
 UGEEN_RENEW_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "ugeen_renew_user.py")
+LAYERSEVEN_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "layerseven_automation.py")
 
 
 def verify_api_key():
@@ -378,6 +379,117 @@ def generate_ugeen():
         return jsonify({'error': str(e)}), 500
 
 
+def run_layerseven_script(user_id=None, callback_url=None):
+    """Run the LayerSeven automation script in a separate process."""
+    try:
+        cmd = [sys.executable, LAYERSEVEN_SCRIPT_PATH]
+
+        if user_id:
+            cmd.extend(['--user-id', str(user_id)])
+
+        if callback_url:
+            cmd.extend(['--callback-url', callback_url])
+
+        print(f"[*] Running LayerSeven command: {' '.join(cmd)}")
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=900
+        )
+
+        print(f"[*] LayerSeven script completed with return code: {result.returncode}")
+        print(f"[*] STDOUT: {result.stdout[-500:]}")
+
+        if result.returncode != 0:
+            print(f"[!] STDERR: {result.stderr[-500:]}")
+
+        return {
+            'success': result.returncode == 0,
+            'return_code': result.returncode,
+            'output': result.stdout[-1000:] if result.stdout else None,
+            'error': result.stderr[-1000:] if result.stderr else None
+        }
+
+    except subprocess.TimeoutExpired:
+        print("[!] LayerSeven script execution timed out after 15 minutes")
+        return {
+            'success': False,
+            'error': 'LayerSeven script execution timed out after 15 minutes'
+        }
+    except Exception as e:
+        print(f"[!] Error running LayerSeven script: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+
+@app.route('/api/generate/layerseven', methods=['POST'])
+def generate_layerseven():
+    """
+    Trigger LayerSeven account generation.
+
+    Request body:
+    {
+        "user_id": 123,
+        "callback_url": "https://your-app.com/api/webhooks/layerseven-automation"
+    }
+    """
+    print("[WARNING] API key verification is DISABLED - for testing only!")
+
+    try:
+        data = request.get_json() or {}
+        user_id = data.get('user_id')
+        callback_url = data.get('callback_url')
+
+        print(f"[*] Received LayerSeven request: user_id={user_id}, callback_url={callback_url}")
+
+        def run_in_background():
+            run_layerseven_script(user_id=user_id, callback_url=callback_url)
+
+        thread = threading.Thread(target=run_in_background, daemon=True)
+        thread.start()
+
+        return jsonify({
+            'status': 'started',
+            'message': 'LayerSeven automation script started in background. Results will be sent to callback URL if provided.',
+            'user_id': user_id,
+            'estimated_time': '2-8 minutes'
+        }), 202
+
+    except Exception as e:
+        print(f"[!] Error in generate_layerseven endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/generate/layerseven/sync', methods=['POST'])
+def generate_layerseven_sync():
+    """Trigger LayerSeven account generation synchronously."""
+    print("[WARNING] API key verification is DISABLED - for testing only!")
+
+    try:
+        data = request.get_json() or {}
+        user_id = data.get('user_id')
+        callback_url = data.get('callback_url')
+        result = run_layerseven_script(user_id=user_id, callback_url=callback_url)
+
+        return jsonify({
+            'status': 'completed' if result['success'] else 'failed',
+            'result': result
+        }), 200 if result['success'] else 500
+
+    except Exception as e:
+        print(f"[!] Error in generate_layerseven_sync endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 8899))
     host = os.getenv('HOST', '0.0.0.0')
@@ -388,3 +500,5 @@ if __name__ == '__main__':
     print(f"[*] Debug mode: {debug}")
 
     app.run(host=host, port=port, debug=debug)
+
+
