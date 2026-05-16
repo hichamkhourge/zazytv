@@ -106,7 +106,10 @@ fi
 echo ""
 
 # Start the Telegram Bot in the background (if enabled)
-if [ "${TELEGRAM_BOT_ENABLED:-false}" = "true" ] || [ "${TELEGRAM_ENABLED:-false}" = "true" ]; then
+# Convert TELEGRAM_ENABLED to lowercase for case-insensitive comparison (accepts True, true, TRUE)
+TELEGRAM_ENABLED_LOWER=$(echo "${TELEGRAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
+
+if [ "${TELEGRAM_BOT_ENABLED:-false}" = "true" ] || [ "$TELEGRAM_ENABLED_LOWER" = "true" ]; then
     echo "[*] Starting Telegram Bot..."
     python /app/telegram_bot.py \
         >> /var/log/telegram-bot.log 2>&1 &
@@ -120,7 +123,7 @@ if [ "${TELEGRAM_BOT_ENABLED:-false}" = "true" ] || [ "${TELEGRAM_ENABLED:-false
     fi
     echo ""
 else
-    echo "[*] Telegram Bot disabled (set TELEGRAM_ENABLED=true to enable)"
+    echo "[*] Telegram Bot disabled (set TELEGRAM_ENABLED=true or True to enable)"
     echo ""
 fi
 
