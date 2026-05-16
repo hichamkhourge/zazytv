@@ -54,6 +54,9 @@ COPY layerseven_automation.py .
 COPY ugeen_api_scraper.py .
 COPY telegram_notifier.py .
 COPY api_server.py .
+COPY telegram_bot.py .
+COPY uzeen_playlist_updater.py .
+COPY check_uzeen_expiration.py .
 COPY .env.example .
 COPY automation_api/ ./automation_api/
 
