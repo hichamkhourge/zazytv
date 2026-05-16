@@ -105,6 +105,25 @@ else
 fi
 echo ""
 
+# Start the Telegram Bot in the background (if enabled)
+if [ "${TELEGRAM_BOT_ENABLED:-false}" = "true" ] || [ "${TELEGRAM_ENABLED:-false}" = "true" ]; then
+    echo "[*] Starting Telegram Bot..."
+    python /app/telegram_bot.py \
+        >> /var/log/telegram-bot.log 2>&1 &
+    BOT_PID=$!
+    sleep 2
+
+    if ps -p $BOT_PID > /dev/null 2>&1; then
+        echo "[✓] Telegram Bot started (PID: $BOT_PID)"
+    else
+        echo "[!] WARNING: Telegram Bot failed to start. Check /var/log/telegram-bot.log"
+    fi
+    echo ""
+else
+    echo "[*] Telegram Bot disabled (set TELEGRAM_ENABLED=true to enable)"
+    echo ""
+fi
+
 # Execute the command passed to the entrypoint (usually "cron -f")
 exec "$@"
 

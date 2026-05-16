@@ -1,0 +1,5 @@
+#EXTM3U
+#EXTINF:-1 tvg-id="" tvg-name="Test Channel 1" tvg-logo="" group-title="Sports",Test Channel 1
+http://example.com:8080/testuser/testpass123/12345.ts
+#EXTINF:-1 tvg-id="" tvg-name="Test Channel 2" tvg-logo="" group-title="Movies",Test Channel 2
+http://example.com:8080/testuser/testpass123/12346.ts
