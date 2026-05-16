@@ -21,7 +21,7 @@ aiofiles==25.1.0
 anyio==4.12.1
 
 # Telegram bot for interactive commands
-python-telegram-bot==20.7
+python-telegram-bot==21.0
 
 # Web scraping utilities
 beautifulsoup4==4.14.3
