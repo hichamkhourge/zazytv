@@ -70,18 +70,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     welcome_message = (
-        "🤖 **Zazy Telegram Bot**\n\n"
+        "🤖 <b>Zazy Telegram Bot</b>\n\n"
         "Welcome! I can help you manage the Uzeen playlist updater.\n\n"
-        "**Available Commands:**\n"
+        "<b>Available Commands:</b>\n"
         "/uzeen - Run uzeen playlist updater now\n"
-        "/uzeen\\_status - Show current credentials\n"
-        "/uzeen\\_history - Show credential change history\n"
+        "/uzeen_status - Show current credentials\n"
+        "/uzeen_history - Show credential change history\n"
         "/help - Show this help message\n"
         "/ping - Check if bot is alive\n\n"
         "The bot also runs automatically via cron every 6 hours."
     )
 
-    await update.message.reply_text(welcome_message, parse_mode='Markdown')
+    await update.message.reply_text(welcome_message, parse_mode='HTML')
     logger.info(f"Sent welcome message to chat_id: {chat_id}")
 
 
@@ -94,25 +94,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     help_message = (
-        "📚 **Zazy Bot Commands**\n\n"
-        "**/uzeen** - Trigger uzeen playlist updater\n"
+        "📚 <b>Zazy Bot Commands</b>\n\n"
+        "<b>/uzeen</b> - Trigger uzeen playlist updater\n"
         "  • Fetches latest M3U file\n"
         "  • Extracts Xtream credentials\n"
         "  • Updates IboPlayer if changed\n\n"
-        "**/uzeen\\_status** - Check current status\n"
+        "<b>/uzeen_status</b> - Check current status\n"
         "  • Shows current credentials\n"
         "  • Last update timestamp\n"
         "  • Playlist ID\n\n"
-        "**/uzeen\\_history** - View change history\n"
+        "<b>/uzeen_history</b> - View change history\n"
         "  • Credential change timeline\n"
         "  • Time between changes\n"
         "  • Change patterns\n\n"
-        "**/ping** - Bot health check\n\n"
-        "**/help** - Show this message\n\n"
-        "**Note:** Automated updates run every 6 hours via cron."
+        "<b>/ping</b> - Bot health check\n\n"
+        "<b>/help</b> - Show this message\n\n"
+        "<b>Note:</b> Automated updates run every 6 hours via cron."
     )
 
-    await update.message.reply_text(help_message, parse_mode='Markdown')
+    await update.message.reply_text(help_message, parse_mode='HTML')
 
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -152,17 +152,17 @@ async def uzeen_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         minutes_ago = int((time_ago.total_seconds() % 3600) / 60)
 
         status_message = (
-            f"📋 **Uzeen Playlist Status**\n\n"
-            f"**Host:** `{state.get('playlist_url', 'N/A')}`\n"
-            f"**Username:** `{state.get('username', 'N/A')}`\n"
-            f"**Password:** `{state.get('password', 'N/A')}`\n"
-            f"**Playlist ID:** `{state.get('playlist_id', 'N/A')}`\n\n"
-            f"**Last Updated:** {last_updated.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"*({hours_ago}h {minutes_ago}m ago)*\n\n"
+            f"📋 <b>Uzeen Playlist Status</b>\n\n"
+            f"<b>Host:</b> <code>{state.get('playlist_url', 'N/A')}</code>\n"
+            f"<b>Username:</b> <code>{state.get('username', 'N/A')}</code>\n"
+            f"<b>Password:</b> <code>{state.get('password', 'N/A')}</code>\n"
+            f"<b>Playlist ID:</b> <code>{state.get('playlist_id', 'N/A')}</code>\n\n"
+            f"<b>Last Updated:</b> {last_updated.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"<i>({hours_ago}h {minutes_ago}m ago)</i>\n\n"
             f"✅ Playlist is configured"
         )
 
-        await update.message.reply_text(status_message, parse_mode='Markdown')
+        await update.message.reply_text(status_message, parse_mode='HTML')
         logger.info(f"Sent status to chat_id: {chat_id}")
 
     except Exception as e:
@@ -197,23 +197,23 @@ async def uzeen_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Build history message (show last 5 changes)
-        history_lines = [f"📊 **Credential Change History**\n"]
+        history_lines = [f"📊 <b>Credential Change History</b>\n"]
 
         for i, change in enumerate(reversed(changes[-5:]), 1):
             timestamp = datetime.fromisoformat(change['timestamp'])
             history_lines.append(
-                f"\n**{len(changes) - i + 1}.** {timestamp.strftime('%Y-%m-%d %H:%M')}\n"
-                f"   Host: `{change['playlist_url']}`\n"
-                f"   User: `{change['username']}`\n"
-                f"   Pass: `{change['password']}`"
+                f"\n<b>{len(changes) - i + 1}.</b> {timestamp.strftime('%Y-%m-%d %H:%M')}\n"
+                f"   Host: <code>{change['playlist_url']}</code>\n"
+                f"   User: <code>{change['username']}</code>\n"
+                f"   Pass: <code>{change['password']}</code>"
             )
 
         if len(changes) > 5:
-            history_lines.append(f"\n\n_Showing last 5 of {len(changes)} total changes_")
+            history_lines.append(f"\n\n<i>Showing last 5 of {len(changes)} total changes</i>")
         else:
-            history_lines.append(f"\n\n_Total changes: {len(changes)}_")
+            history_lines.append(f"\n\n<i>Total changes: {len(changes)}</i>")
 
-        await update.message.reply_text('\n'.join(history_lines), parse_mode='Markdown')
+        await update.message.reply_text('\n'.join(history_lines), parse_mode='HTML')
         logger.info(f"Sent history to chat_id: {chat_id}")
 
     except Exception as e:
@@ -231,7 +231,7 @@ async def run_uzeen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Send initial message
-    await update.message.reply_text("🔄 **Running Uzeen Playlist Updater...**\n\nPlease wait, this may take 30-60 seconds.")
+    await update.message.reply_text("🔄 <b>Running Uzeen Playlist Updater...</b>\n\nPlease wait, this may take 30-60 seconds.", parse_mode='HTML')
     logger.info(f"Starting uzeen updater for chat_id: {chat_id}")
 
     try:
@@ -274,56 +274,58 @@ async def run_uzeen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Build response message
         if no_changes:
             response = (
-                f"✅ **Uzeen Update Complete**\n\n"
+                f"✅ <b>Uzeen Update Complete</b>\n\n"
                 f"ℹ️ No changes detected\n"
                 f"Playlist is already up to date!\n\n"
-                f"**Current Credentials:**\n"
-                f"Host: `{host or 'N/A'}`\n"
-                f"Username: `{username or 'N/A'}`\n"
-                f"Password: `{password or 'N/A'}`"
+                f"<b>Current Credentials:</b>\n"
+                f"Host: <code>{host or 'N/A'}</code>\n"
+                f"Username: <code>{username or 'N/A'}</code>\n"
+                f"Password: <code>{password or 'N/A'}</code>"
             )
         elif success:
             response = (
-                f"✅ **Uzeen Update Successful!**\n\n"
-                f"**New Credentials:**\n"
-                f"Host: `{host or 'N/A'}`\n"
-                f"Username: `{username or 'N/A'}`\n"
-                f"Password: `{password or 'N/A'}`\n\n"
-                f"**Changed:** {', '.join(changed_fields) if changed_fields else 'initial_setup'}\n\n"
+                f"✅ <b>Uzeen Update Successful!</b>\n\n"
+                f"<b>New Credentials:</b>\n"
+                f"Host: <code>{host or 'N/A'}</code>\n"
+                f"Username: <code>{username or 'N/A'}</code>\n"
+                f"Password: <code>{password or 'N/A'}</code>\n\n"
+                f"<b>Changed:</b> {', '.join(changed_fields) if changed_fields else 'initial_setup'}\n\n"
                 f"IboPlayer playlist updated!"
             )
         elif error_msg:
             response = (
-                f"❌ **Update Failed**\n\n"
+                f"❌ <b>Update Failed</b>\n\n"
                 f"Error: {error_msg}\n\n"
                 f"Check logs for details."
             )
         else:
             # Show abbreviated output
             response = (
-                f"⚠️ **Update Completed with Warnings**\n\n"
+                f"⚠️ <b>Update Completed with Warnings</b>\n\n"
                 f"Please check the details below:\n\n"
-                f"```\n{result.stdout[-500:]}\n```"
+                f"<pre>{result.stdout[-500:]}</pre>"
             )
 
-        await update.message.reply_text(response, parse_mode='Markdown')
+        await update.message.reply_text(response, parse_mode='HTML')
         logger.info(f"Uzeen updater completed for chat_id: {chat_id}, success: {success or no_changes}")
 
     except subprocess.TimeoutExpired:
         await update.message.reply_text(
-            "⏱️ **Timeout**\n\n"
-            "The updater script took too long (>5 minutes).\n"
+            "⏱️ <b>Timeout</b>\n\n"
+            "The updater script took too long (&gt;5 minutes).\n"
             "This might indicate an issue with the M3U server.\n\n"
-            "Try again later or check logs."
+            "Try again later or check logs.",
+            parse_mode='HTML'
         )
         logger.error(f"Timeout running uzeen updater for chat_id: {chat_id}")
 
     except Exception as e:
         await update.message.reply_text(
-            f"❌ **Error**\n\n"
+            f"❌ <b>Error</b>\n\n"
             f"Failed to run updater script:\n"
-            f"`{str(e)}`\n\n"
-            f"Check bot logs for details."
+            f"<code>{str(e)}</code>\n\n"
+            f"Check bot logs for details.",
+            parse_mode='HTML'
         )
         logger.error(f"Error running uzeen updater for chat_id: {chat_id}: {e}", exc_info=True)
 
