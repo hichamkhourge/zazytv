@@ -182,10 +182,65 @@ def dump_debug(driver, label):
     print("---\n")
 
 
-def click_bouquet_wizard_until_applied(driver):
+def select_specific_bouquets(driver, bouquet_ids):
+    """
+    Selects specific bouquets by their IDs in the LayerSeven bouquet picker modal.
+
+    The bouquet checkboxes have values like "1", "3", "60", etc. corresponding to bouquet IDs.
+    First, uncheck all bouquets, then check only the requested ones.
+    """
+    if not bouquet_ids:
+        print("[*] No specific bouquets to select, using default selection")
+        return
+
+    print(f"[*] Selecting {len(bouquet_ids)} specific bouquets: {bouquet_ids}")
+
+    try:
+        # Find all checkbox inputs within the modal
+        checkboxes = driver.find_elements(By.XPATH, "//input[@type='checkbox' and @value]")
+
+        selected_count = 0
+        for checkbox in checkboxes:
+            value = checkbox.get_attribute("value")
+
+            # Skip if no value or not numeric
+            if not value or not value.isdigit():
+                continue
+
+            bouquet_id = int(value)
+            is_checked = checkbox.is_selected()
+            should_be_checked = bouquet_id in bouquet_ids
+
+            # Update checkbox state if it doesn't match desired state
+            if is_checked != should_be_checked:
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", checkbox)
+                    time.sleep(0.2)
+                    safe_click(driver, checkbox)
+
+                    if should_be_checked:
+                        selected_count += 1
+                        print(f"[OK] Selected bouquet {bouquet_id}")
+                except Exception as e:
+                    print(f"[!] Could not toggle bouquet {bouquet_id}: {e}")
+            elif should_be_checked:
+                selected_count += 1
+
+        print(f"[OK] {selected_count} bouquets selected")
+        time.sleep(1)
+
+    except Exception as e:
+        print(f"[!] Error selecting specific bouquets: {e}")
+        print("[*] Continuing with default selection")
+
+
+def click_bouquet_wizard_until_applied(driver, bouquets=None):
     """
     LayerSeven's bouquet picker is a multi-step modal. The same #savebqbtn
     advances through content types and eventually applies the selection.
+
+    If bouquets is provided (list of bouquet IDs), selects only those specific bouquets.
+    Otherwise, selects all bouquets (default behavior).
     """
     for step in range(1, 8):
         try:
@@ -198,6 +253,11 @@ def click_bouquet_wizard_until_applied(driver):
 
         label = (btn.get_attribute("value") or btn.text or "").strip()
         print(f"[*] Bouquet wizard step {step}: {label or 'button'}")
+
+        # If specific bouquets are requested, select them before clicking the button
+        if bouquets and step == 1:
+            select_specific_bouquets(driver, bouquets)
+
         safe_click(driver, btn)
         time.sleep(1.5)
 
@@ -239,7 +299,7 @@ def ensure_product_configuration_page(driver):
             return
 
 
-def configure_product(driver):
+def configure_product(driver, bouquets=None):
     print(f"[*] Navigating to LayerSeven cart: {LAYERSEVEN_CART_URL}")
     driver.get(LAYERSEVEN_CART_URL)
     WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
@@ -273,7 +333,7 @@ def configure_product(driver):
         print(f"[!] Could not open bouquet selector: {exc}")
 
     print("[*] Selecting bouquets...")
-    click_bouquet_wizard_until_applied(driver)
+    click_bouquet_wizard_until_applied(driver, bouquets=bouquets)
 
     print("[*] Continuing to checkout...")
     try:
@@ -630,7 +690,7 @@ def extract_credentials_from_ready_email(driver):
     return portal_url, username, password, m3u_url
 
 
-def send_webhook_callback(callback_url, user_id, status, username=None, password=None, host=None, m3u_url=None, error=None, max_retries=3):
+def send_webhook_callback(callback_url, user_id, status, username=None, password=None, host=None, m3u_url=None, error=None, bouquets=None, max_retries=3):
     if not callback_url:
         print("[*] No callback URL provided, skipping webhook")
         return False
@@ -642,6 +702,8 @@ def send_webhook_callback(callback_url, user_id, status, username=None, password
     }
     if status == "success":
         payload.update({"username": username, "password": password, "host": host, "m3u_url": m3u_url})
+        if bouquets:
+            payload["bouquets"] = bouquets
     else:
         payload["error"] = error
 
@@ -668,17 +730,18 @@ def send_webhook_callback(callback_url, user_id, status, username=None, password
     return False
 
 
-def main(user_id=None, callback_url=None):
+def main(user_id=None, callback_url=None, bouquets=None):
     driver = get_driver()
     is_laravel_mode = bool(user_id and callback_url)
 
     print("\n[*] Starting LayerSeven automation...")
     print(f"[*] User ID: {user_id if user_id else 'N/A'}")
     print(f"[*] Callback URL: {callback_url if callback_url else 'N/A'}")
+    print(f"[*] Bouquets: {bouquets if bouquets else 'Default (all)'}")
     print(f"[*] Laravel integration mode: {is_laravel_mode}")
 
     try:
-        configure_product(driver)
+        configure_product(driver, bouquets=bouquets)
         fill_checkout_form(driver)
         complete_order(driver)
         host, username, password, m3u_url = extract_credentials_from_ready_email(driver)
@@ -692,6 +755,7 @@ def main(user_id=None, callback_url=None):
                 password=password,
                 host=host,
                 m3u_url=m3u_url,
+                bouquets=bouquets,
             )
         else:
             notifier.notify_success(m3u_url, username, None)
@@ -738,10 +802,23 @@ if __name__ == "__main__":
 Examples:
   python layerseven_automation.py
   python layerseven_automation.py --user-id 123 --callback-url https://app.com/api/webhooks/layerseven-automation
+  python layerseven_automation.py --user-id 123 --callback-url https://... --bouquets 1,3,60,63
         """,
     )
     parser.add_argument("--user-id", type=int, help="Laravel IPTV account ID")
     parser.add_argument("--callback-url", type=str, help="Webhook callback URL")
+    parser.add_argument("--bouquets", type=str, help="Comma-separated list of bouquet IDs (e.g., 1,3,60,63)")
     args = parser.parse_args()
-    main(user_id=args.user_id, callback_url=args.callback_url)
+
+    # Parse bouquet IDs from comma-separated string
+    bouquet_list = None
+    if args.bouquets:
+        try:
+            bouquet_list = [int(bid.strip()) for bid in args.bouquets.split(",") if bid.strip()]
+            print(f"[*] Parsed bouquet IDs: {bouquet_list}")
+        except ValueError as e:
+            print(f"[!] Invalid bouquet format: {e}")
+            print("[*] Expected format: --bouquets 1,3,60,63")
+
+    main(user_id=args.user_id, callback_url=args.callback_url, bouquets=bouquet_list)
 

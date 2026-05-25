@@ -379,8 +379,15 @@ def generate_ugeen():
         return jsonify({'error': str(e)}), 500
 
 
-def run_layerseven_script(user_id=None, callback_url=None):
-    """Run the LayerSeven automation script in a separate process."""
+def run_layerseven_script(user_id=None, callback_url=None, bouquets=None):
+    """
+    Run the LayerSeven automation script in a separate process.
+
+    Args:
+        user_id: Laravel IPTV account ID
+        callback_url: Webhook callback URL
+        bouquets: List of bouquet IDs to select
+    """
     try:
         cmd = [sys.executable, LAYERSEVEN_SCRIPT_PATH]
 
@@ -389,6 +396,11 @@ def run_layerseven_script(user_id=None, callback_url=None):
 
         if callback_url:
             cmd.extend(['--callback-url', callback_url])
+
+        if bouquets:
+            # Convert list of bouquet IDs to comma-separated string
+            bouquet_str = ','.join(str(bid) for bid in bouquets)
+            cmd.extend(['--bouquets', bouquet_str])
 
         print(f"[*] Running LayerSeven command: {' '.join(cmd)}")
 
@@ -436,7 +448,8 @@ def generate_layerseven():
     Request body:
     {
         "user_id": 123,
-        "callback_url": "https://your-app.com/api/webhooks/layerseven-automation"
+        "callback_url": "https://your-app.com/api/webhooks/layerseven-automation",
+        "bouquets": [1, 3, 60, 63]  // Optional - specific bouquet IDs to select
     }
     """
     print("[WARNING] API key verification is DISABLED - for testing only!")
@@ -445,11 +458,12 @@ def generate_layerseven():
         data = request.get_json() or {}
         user_id = data.get('user_id')
         callback_url = data.get('callback_url')
+        bouquets = data.get('bouquets')  # Optional list of bouquet IDs
 
-        print(f"[*] Received LayerSeven request: user_id={user_id}, callback_url={callback_url}")
+        print(f"[*] Received LayerSeven request: user_id={user_id}, callback_url={callback_url}, bouquets={bouquets}")
 
         def run_in_background():
-            run_layerseven_script(user_id=user_id, callback_url=callback_url)
+            run_layerseven_script(user_id=user_id, callback_url=callback_url, bouquets=bouquets)
 
         thread = threading.Thread(target=run_in_background, daemon=True)
         thread.start()
@@ -470,14 +484,24 @@ def generate_layerseven():
 
 @app.route('/api/generate/layerseven/sync', methods=['POST'])
 def generate_layerseven_sync():
-    """Trigger LayerSeven account generation synchronously."""
+    """
+    Trigger LayerSeven account generation synchronously.
+
+    Request body:
+    {
+        "user_id": 123,
+        "callback_url": "https://your-app.com/api/webhooks/layerseven-automation",
+        "bouquets": [1, 3, 60, 63]  // Optional - specific bouquet IDs to select
+    }
+    """
     print("[WARNING] API key verification is DISABLED - for testing only!")
 
     try:
         data = request.get_json() or {}
         user_id = data.get('user_id')
         callback_url = data.get('callback_url')
-        result = run_layerseven_script(user_id=user_id, callback_url=callback_url)
+        bouquets = data.get('bouquets')  # Optional list of bouquet IDs
+        result = run_layerseven_script(user_id=user_id, callback_url=callback_url, bouquets=bouquets)
 
         return jsonify({
             'status': 'completed' if result['success'] else 'failed',
