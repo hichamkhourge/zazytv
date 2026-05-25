@@ -361,8 +361,8 @@ def click_bouquet_wizard_until_applied(driver, bouquets=None):
                 pass
             break
 
-    # Wait a moment for the page to update
-    time.sleep(2)
+    # Wait longer for JavaScript to fully populate the field
+    time.sleep(5)
 
     # Inspect field AFTER modal closes
     print("[*] Checking customfield25 AFTER bouquet selection...")
@@ -370,17 +370,41 @@ def click_bouquet_wizard_until_applied(driver, bouquets=None):
 
     # Verify the field was populated
     if bouquets and field_value:
-        # Check if the field contains any of our bouquet IDs
-        field_str = str(field_value)
-        found_count = sum(1 for bid in bouquets if str(bid) in field_str)
+        # Parse field value to extract bouquet IDs (support multiple formats)
+        field_str = str(field_value).strip()
+        found_ids = []
 
-        print(f"[*] Verification: Found {found_count}/{len(bouquets)} bouquet IDs in customfield25")
+        try:
+            # Try comma-separated format: "60,63"
+            if ',' in field_str:
+                found_ids = [int(x.strip()) for x in field_str.split(',') if x.strip().isdigit()]
+            # Try JSON array format: "[60,63]"
+            elif field_str.startswith('[') and field_str.endswith(']'):
+                found_ids = json.loads(field_str)
+            # Try pipe-separated format: "60|63"
+            elif '|' in field_str:
+                found_ids = [int(x.strip()) for x in field_str.split('|') if x.strip().isdigit()]
+            # Single number
+            elif field_str.isdigit():
+                found_ids = [int(field_str)]
+        except Exception as e:
+            print(f"[!] Could not parse customfield25 value: {e}")
+            found_ids = []
 
-        if found_count > 0:
-            print("[OK] Bouquet field appears to be populated correctly")
+        # Check how many requested IDs are present in the field
+        matching_ids = set(bouquets) & set(found_ids)
+        match_percentage = len(matching_ids) / len(bouquets) * 100 if bouquets else 0
+
+        print(f"[*] Verification: Requested {len(bouquets)} bouquets, found {len(found_ids)} IDs in field")
+        print(f"[*] Matching IDs: {list(matching_ids)} ({match_percentage:.0f}% match)")
+
+        if len(matching_ids) >= len(bouquets) * 0.8:  # At least 80% of requested bouquets
+            print("[OK] Bouquet field contains requested IDs")
             return True
         else:
-            print("[!] WARNING: Bouquet field does not contain expected IDs")
+            print(f"[!] WARNING: Only {len(matching_ids)}/{len(bouquets)} bouquets matched")
+            print(f"[!] Requested: {bouquets}")
+            print(f"[!] Found in field: {found_ids}")
             return False
     elif not bouquets:
         # If no specific bouquets requested, just check if field has some value
@@ -487,7 +511,78 @@ def configure_product(driver, bouquets=None):
         print("Specific bouquets were requested but could not be applied.")
         print("Aborting automation to prevent creating account with wrong bouquets.")
         print("="*60 + "\n")
+
+        # Take screenshot for debugging
+        try:
+            screenshot_path = f"/tmp/layerseven_bouquet_fail_{user_id}_{int(time.time())}.png"
+            driver.save_screenshot(screenshot_path)
+            print(f"[*] Debug screenshot saved: {screenshot_path}")
+        except Exception as e:
+            print(f"[!] Could not save screenshot: {e}")
+
         raise RuntimeError("Failed to apply bouquet selection - aborting automation")
+
+    # FINAL verification before clicking Continue button
+    if bouquets:
+        print("[*] Final verification of customfield25 before proceeding to checkout...")
+        final_field_value = inspect_bouquet_field(driver, label="(FINAL CHECK BEFORE CONTINUE)")
+
+        # Parse and verify the field contains our bouquets
+        field_str = str(final_field_value).strip()
+        found_ids = []
+
+        try:
+            if ',' in field_str:
+                found_ids = [int(x.strip()) for x in field_str.split(',') if x.strip().isdigit()]
+            elif field_str.startswith('[') and field_str.endswith(']'):
+                found_ids = json.loads(field_str)
+            elif '|' in field_str:
+                found_ids = [int(x.strip()) for x in field_str.split('|') if x.strip().isdigit()]
+            elif field_str.isdigit():
+                found_ids = [int(field_str)]
+        except Exception as e:
+            print(f"[!] Could not parse final field value: {e}")
+
+        if not found_ids or len(found_ids) == 0:
+            print("[!] CRITICAL: customfield25 is EMPTY before clicking Continue!")
+            print("[!] This would result in wrong channels being delivered.")
+
+            # Take screenshot for debugging
+            try:
+                screenshot_path = f"/tmp/layerseven_empty_field_{user_id}_{int(time.time())}.png"
+                driver.save_screenshot(screenshot_path)
+                print(f"[*] Debug screenshot saved: {screenshot_path}")
+            except Exception as e:
+                print(f"[!] Could not save screenshot: {e}")
+
+            print("[!] Aborting automation to prevent wrong channel delivery.")
+            raise RuntimeError("Bouquet field empty before checkout - selection not applied")
+
+        # Check if we have reasonable match (at least 80% of requested bouquets)
+        matching_ids = set(bouquets) & set(found_ids)
+        match_percentage = (len(matching_ids) / len(bouquets) * 100) if bouquets else 0
+
+        print(f"[*] Final verification result:")
+        print(f"    Requested: {bouquets}")
+        print(f"    Found in field: {found_ids}")
+        print(f"    Matching: {list(matching_ids)} ({match_percentage:.1f}%)")
+
+        if match_percentage < 80:
+            print(f"[!] WARNING: Only {match_percentage:.1f}% of requested bouquets are set!")
+            print("[!] This may result in incorrect channels.")
+
+            # Take screenshot for debugging
+            try:
+                screenshot_path = f"/tmp/layerseven_partial_match_{user_id}_{int(time.time())}.png"
+                driver.save_screenshot(screenshot_path)
+                print(f"[*] Debug screenshot saved: {screenshot_path}")
+            except Exception as e:
+                print(f"[!] Could not save screenshot: {e}")
+
+            print("[!] Aborting automation due to insufficient match.")
+            raise RuntimeError(f"Bouquet verification failed: only {match_percentage:.1f}% match")
+
+        print(f"[OK] Final verification passed: {match_percentage:.1f}% match")
 
     print("[*] Continuing to checkout...")
     try:
