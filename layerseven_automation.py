@@ -182,6 +182,90 @@ def dump_debug(driver, label):
     print("---\n")
 
 
+def inspect_bouquet_field(driver, label=""):
+    """
+    Inspect and log the customfield[25] input value for debugging.
+    This field stores the selected bouquet IDs on LayerSeven's checkout page.
+    """
+    try:
+        # Try to find the customfield25 input
+        field = driver.find_element(By.ID, "customfield25")
+        value = field.get_attribute("value") or ""
+        readonly = field.get_attribute("readonly")
+
+        print(f"\n{'='*60}")
+        print(f"[DEBUG] Bouquet Field Inspection {label}")
+        print(f"{'='*60}")
+        print(f"Field ID: customfield25")
+        print(f"Field Name: {field.get_attribute('name')}")
+        print(f"Current Value: '{value}'")
+        print(f"Value Length: {len(value)}")
+        print(f"Is Readonly: {readonly}")
+        print(f"Is Displayed: {field.is_displayed()}")
+        print(f"{'='*60}\n")
+
+        return value
+    except Exception as e:
+        print(f"[!] Could not inspect customfield25: {e}")
+        return None
+
+
+def set_customfield_directly(driver, bouquet_ids, format_type="comma"):
+    """
+    Directly set the customfield[25] input value as a fallback if modal fails.
+
+    Args:
+        driver: Selenium WebDriver instance
+        bouquet_ids: List of bouquet IDs to set
+        format_type: Format to use ('comma', 'json', 'pipe')
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not bouquet_ids:
+        print("[*] No bouquets to set in customfield")
+        return True
+
+    try:
+        field = driver.find_element(By.ID, "customfield25")
+
+        # Format the bouquet IDs based on the format type
+        if format_type == "comma":
+            value = ",".join(str(bid) for bid in bouquet_ids)
+        elif format_type == "json":
+            value = json.dumps(bouquet_ids)
+        elif format_type == "pipe":
+            value = "|".join(str(bid) for bid in bouquet_ids)
+        else:
+            value = ",".join(str(bid) for bid in bouquet_ids)  # Default to comma
+
+        print(f"[*] Directly setting customfield25 to: {value}")
+
+        # Use JavaScript to set the readonly field value
+        driver.execute_script(
+            "arguments[0].value = arguments[1]; "
+            "arguments[0].dispatchEvent(new Event('change', {bubbles: true})); "
+            "arguments[0].dispatchEvent(new Event('input', {bubbles: true}));",
+            field,
+            value
+        )
+
+        time.sleep(1)
+
+        # Verify it was set
+        actual_value = field.get_attribute("value")
+        if actual_value == value:
+            print(f"[OK] Successfully set customfield25 to: {value}")
+            return True
+        else:
+            print(f"[!] Failed to set customfield25. Expected: {value}, Got: {actual_value}")
+            return False
+
+    except Exception as e:
+        print(f"[!] Error setting customfield directly: {e}")
+        return False
+
+
 def select_specific_bouquets(driver, bouquet_ids):
     """
     Selects specific bouquets by their IDs in the LayerSeven bouquet picker modal.
@@ -241,7 +325,14 @@ def click_bouquet_wizard_until_applied(driver, bouquets=None):
 
     If bouquets is provided (list of bouquet IDs), selects only those specific bouquets.
     Otherwise, selects all bouquets (default behavior).
+
+    Returns:
+        bool: True if bouquets were successfully applied, False otherwise
     """
+    # Inspect field BEFORE opening modal
+    print("[*] Checking customfield25 BEFORE bouquet selection...")
+    inspect_bouquet_field(driver, label="(BEFORE MODAL)")
+
     for step in range(1, 8):
         try:
             btn = WebDriverWait(driver, 8).until(
@@ -249,7 +340,7 @@ def click_bouquet_wizard_until_applied(driver, bouquets=None):
             )
         except Exception:
             print("[*] Bouquet wizard button is no longer visible")
-            return
+            break
 
         label = (btn.get_attribute("value") or btn.text or "").strip()
         print(f"[*] Bouquet wizard step {step}: {label or 'button'}")
@@ -268,7 +359,41 @@ def click_bouquet_wizard_until_applied(driver, bouquets=None):
                 )
             except Exception:
                 pass
-            return
+            break
+
+    # Wait a moment for the page to update
+    time.sleep(2)
+
+    # Inspect field AFTER modal closes
+    print("[*] Checking customfield25 AFTER bouquet selection...")
+    field_value = inspect_bouquet_field(driver, label="(AFTER MODAL)")
+
+    # Verify the field was populated
+    if bouquets and field_value:
+        # Check if the field contains any of our bouquet IDs
+        field_str = str(field_value)
+        found_count = sum(1 for bid in bouquets if str(bid) in field_str)
+
+        print(f"[*] Verification: Found {found_count}/{len(bouquets)} bouquet IDs in customfield25")
+
+        if found_count > 0:
+            print("[OK] Bouquet field appears to be populated correctly")
+            return True
+        else:
+            print("[!] WARNING: Bouquet field does not contain expected IDs")
+            return False
+    elif not bouquets:
+        # If no specific bouquets requested, just check if field has some value
+        if field_value and len(field_value) > 0:
+            print("[OK] Bouquet field has been populated (all bouquets mode)")
+            return True
+        else:
+            print("[!] WARNING: Bouquet field is empty")
+            return False
+    else:
+        # Field is empty but we requested specific bouquets
+        print("[!] WARNING: Bouquet field is empty after modal")
+        return False
 
 
 def ensure_product_configuration_page(driver):
@@ -322,6 +447,7 @@ def configure_product(driver, bouquets=None):
         print("[!] Device dropdown not found. Continuing; product may already be configured.")
 
     print("[*] Opening bouquet selector...")
+    bouquet_success = False
     try:
         try:
             bouquet_button = driver.find_element(By.ID, "selectbouquetsbtn")
@@ -329,11 +455,39 @@ def configure_product(driver, bouquets=None):
             bouquet_button = find_clickable_by_text(driver, ["select bouquets", "bouquets"], timeout=10)
         safe_click(driver, bouquet_button)
         time.sleep(2)
-    except Exception as exc:
-        print(f"[!] Could not open bouquet selector: {exc}")
 
-    print("[*] Selecting bouquets...")
-    click_bouquet_wizard_until_applied(driver, bouquets=bouquets)
+        print("[*] Selecting bouquets via modal...")
+        bouquet_success = click_bouquet_wizard_until_applied(driver, bouquets=bouquets)
+
+        # If modal failed and we have specific bouquets, try direct field manipulation
+        if not bouquet_success and bouquets:
+            print("[!] Modal-based selection failed or didn't populate field correctly")
+            print("[*] Attempting fallback: direct field manipulation...")
+
+            # Try different formats to see which one works
+            for format_type in ["comma", "json", "pipe"]:
+                print(f"[*] Trying format: {format_type}")
+                if set_customfield_directly(driver, bouquets, format_type=format_type):
+                    bouquet_success = True
+                    print(f"[OK] Successfully set bouquets using {format_type} format")
+                    break
+
+            if not bouquet_success:
+                print("[!] All fallback attempts failed")
+
+    except Exception as exc:
+        print(f"[!] Error during bouquet selection: {exc}")
+        bouquet_success = False
+
+    # If bouquet selection was requested but failed completely, abort
+    if bouquets and not bouquet_success:
+        print("\n" + "="*60)
+        print("[CRITICAL] BOUQUET SELECTION FAILED")
+        print("="*60)
+        print("Specific bouquets were requested but could not be applied.")
+        print("Aborting automation to prevent creating account with wrong bouquets.")
+        print("="*60 + "\n")
+        raise RuntimeError("Failed to apply bouquet selection - aborting automation")
 
     print("[*] Continuing to checkout...")
     try:
