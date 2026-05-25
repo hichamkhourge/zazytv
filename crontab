@@ -10,5 +10,8 @@
 # UGEEN API Scraper - Runs every day at 6:00 AM (different time to avoid conflicts)
 0 6 * * * cd /app && /usr/local/bin/python /app/ugeen_api_scraper.py >> /var/log/cron.log 2>&1
 
+# UZEEN Playlist Updater - Runs every day at 4:00 PM
+0 16 * * * cd /app && /usr/local/bin/python /app/uzeen_playlist_updater.py >> /var/log/cron.log 2>&1
+
 # Keep cron happy with a newline at the end
 
