@@ -357,9 +357,18 @@ def navigate_to_cart_and_get_free_trial(driver):
         checkout_url = f"{IPTVV_BASE_URL}/checkout/"
         print(f"[*] Navigating to checkout: {checkout_url}")
         driver.get(checkout_url)
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        time.sleep(3)
+        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        time.sleep(5)
+
+        # Wait for document to be fully ready
+        for i in range(10):
+            ready_state = driver.execute_script("return document.readyState")
+            if ready_state == "complete":
+                break
+            time.sleep(1)
+
         print(f"[*] Checkout URL: {driver.current_url}")
+        print(f"[*] Page title: {driver.title}")
 
         # Verify we're on checkout page
         if "checkout" not in driver.current_url.lower():
@@ -378,19 +387,39 @@ def navigate_to_cart_and_get_free_trial(driver):
         # Try direct URL for adding product to cart
         print("[*] Trying direct add-to-cart URL...")
         driver.get("https://iptvv.ca/?add-to-cart=7758")
-        time.sleep(5)
+        time.sleep(8)  # Wait longer for product to be added
         print(f"[*] After add-to-cart URL: {driver.current_url}")
 
         # Navigate to checkout
         checkout_url = f"{IPTVV_BASE_URL}/checkout/"
+        print(f"[*] Navigating to checkout: {checkout_url}")
         driver.get(checkout_url)
+
         # Wait for page to fully load including JavaScript
         WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        time.sleep(5)  # Extra time for WooCommerce JavaScript to initialize
+        time.sleep(8)  # Extra time for WooCommerce JavaScript to initialize
 
-        # Execute JavaScript to ensure the page is fully rendered
-        driver.execute_script("return document.readyState") == "complete"
+        # Wait for document to be fully ready
+        for i in range(10):
+            ready_state = driver.execute_script("return document.readyState")
+            if ready_state == "complete":
+                break
+            time.sleep(1)
+
         print(f"[*] Checkout URL: {driver.current_url}")
+        print(f"[*] Page title: {driver.title}")
+
+        # Check if we actually have checkout form elements
+        try:
+            driver.find_element(By.ID, "billing_email")
+            print("[*] Billing email field detected - form is loaded")
+        except:
+            print("[!] WARNING: Billing email field NOT found - form may not have loaded")
+            # Try scrolling to trigger lazy loading
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(3)
+            driver.execute_script("window.scrollTo(0, 0);")
+            time.sleep(3)
 
 
 def select_full_channel_package(driver):
