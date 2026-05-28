@@ -52,12 +52,14 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 COPY zazy_playlist_automation.py .
 COPY layerseven_automation.py .
 COPY ugeen_api_scraper.py .
+COPY iptvvcanada_automation.py .
 COPY telegram_notifier.py .
 COPY api_server.py .
 COPY telegram_bot.py .
 COPY uzeen_playlist_updater.py .
 COPY check_uzeen_expiration.py .
 COPY .env.example .
+COPY README_IPTVVCANADA.md .
 COPY automation_api/ ./automation_api/
 
 # Create necessary directories
