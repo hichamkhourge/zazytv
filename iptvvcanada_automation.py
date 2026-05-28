@@ -47,9 +47,15 @@ MAILTM_API_BASE = os.getenv("MAILTM_API_BASE", "https://api.mail.tm")
 EMAIL_POLL_SECONDS = int(os.getenv("IPTVV_EMAIL_POLL_SECONDS", "30"))
 EMAIL_MAX_WAIT_SECONDS = int(os.getenv("IPTVV_EMAIL_MAX_WAIT_SECONDS", "2700"))  # 45 minutes
 AUTO_EXIT = os.getenv("AUTO_EXIT", "True").lower() == "true"
+IPTVV_PAGE_LOAD_RETRIES = int(os.getenv("IPTVV_PAGE_LOAD_RETRIES", "2"))
+IPTVV_CLOUDFLARE_WAIT_SECONDS = int(os.getenv("IPTVV_CLOUDFLARE_WAIT_SECONDS", "45"))
 
 CREDENTIALS_EMAIL_SUBJECT = "Your trial is now active"
 solver = TwoCaptcha(TWOCAPTCHA_API_KEY) if TWOCAPTCHA_API_KEY else None
+
+
+class CloudflareBlockedError(RuntimeError):
+    """Raised when IPTVV serves a Cloudflare/WAF page instead of checkout."""
 
 
 # ═══════════════════════════════════════════════════════════
@@ -340,6 +346,98 @@ def find_clickable_by_text(driver, terms, timeout=15):
     raise TimeoutError(f"Could not find clickable element containing: {terms}")
 
 
+def page_text_lower(driver):
+    """Return visible body text, lowercased, without failing page checks."""
+    try:
+        return driver.find_element(By.TAG_NAME, "body").text.lower()
+    except Exception:
+        return ""
+
+
+def is_cloudflare_block_page(driver):
+    """Detect Cloudflare/WAF pages that replace the real WooCommerce checkout."""
+    title = (driver.title or "").lower()
+    current_url = (driver.current_url or "").lower()
+    body = page_text_lower(driver)
+    markers = [
+        "attention required",
+        "cloudflare",
+        "checking your browser",
+        "verify you are human",
+        "cf-browser-verification",
+        "ray id",
+        "error 1020",
+        "access denied",
+    ]
+    return (
+        "cloudflare" in title
+        or "cdn-cgi" in current_url
+        or any(marker in body for marker in markers)
+    )
+
+
+def save_page_debug_artifacts(driver, label):
+    """Save a screenshot and HTML snapshot for production diagnosis."""
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "_", label).strip("_") or "page"
+    base_path = f"/tmp/iptvv_{safe_label}_{timestamp}"
+
+    try:
+        screenshot_path = f"{base_path}.png"
+        driver.save_screenshot(screenshot_path)
+        print(f"[*] Screenshot saved to: {screenshot_path}")
+    except Exception as exc:
+        print(f"[!] Could not save screenshot: {exc}")
+
+    try:
+        html_path = f"{base_path}.html"
+        with open(html_path, "w", encoding="utf-8") as fh:
+            fh.write(driver.page_source)
+        print(f"[*] HTML snapshot saved to: {html_path}")
+    except Exception as exc:
+        print(f"[!] Could not save HTML snapshot: {exc}")
+
+
+def wait_for_real_checkout_page(driver, context, timeout=30):
+    """Wait until the WooCommerce checkout appears, or fail on a blocker page."""
+    print(f"[*] Verifying checkout page after {context}...")
+    deadline = time.time() + timeout
+    cloudflare_seen = False
+    reload_attempts = 0
+
+    while time.time() < deadline:
+        if is_cloudflare_block_page(driver):
+            cloudflare_seen = True
+            print("[!] Cloudflare/WAF page detected instead of checkout; waiting for clearance...")
+            if reload_attempts < IPTVV_PAGE_LOAD_RETRIES:
+                reload_attempts += 1
+                print(f"[*] Reloading page after blocker detection ({reload_attempts}/{IPTVV_PAGE_LOAD_RETRIES})...")
+                driver.refresh()
+            time.sleep(5)
+            continue
+
+        try:
+            driver.find_element(By.ID, "billing_email")
+            print("[OK] Billing email field detected - checkout form is loaded")
+            return True
+        except Exception:
+            time.sleep(1)
+
+    if cloudflare_seen or is_cloudflare_block_page(driver):
+        save_page_debug_artifacts(driver, "cloudflare_block")
+        raise CloudflareBlockedError(
+            "IPTVV checkout is blocked by Cloudflare/WAF in this production container. "
+            "The checkout form never loaded; allowlist the production IP/session with IPTVV/Cloudflare "
+            "or run this provider from a trusted browser environment."
+        )
+
+    save_page_debug_artifacts(driver, "checkout_not_loaded")
+    raise RuntimeError(
+        f"IPTVV checkout form did not load after {context}. "
+        f"Current URL: {driver.current_url}; title: {driver.title}"
+    )
+
+
 def generate_random_user_data():
     """Generate random user data for checkout form."""
     first_names = ["John", "Jane", "Mike", "Sarah", "David", "Emma", "Chris", "Lisa", "Tom", "Amy"]
@@ -410,6 +508,7 @@ def navigate_to_cart_and_get_free_trial(driver):
 
         print(f"[*] Checkout URL: {driver.current_url}")
         print(f"[*] Page title: {driver.title}")
+        wait_for_real_checkout_page(driver, "free-trial cart flow", timeout=IPTVV_CLOUDFLARE_WAIT_SECONDS)
 
         # Verify we're on checkout page
         if "checkout" not in driver.current_url.lower():
@@ -420,6 +519,7 @@ def navigate_to_cart_and_get_free_trial(driver):
                 safe_click(driver, checkout_btn)
                 time.sleep(3)
                 print(f"[*] After clicking checkout button: {driver.current_url}")
+                wait_for_real_checkout_page(driver, "checkout button click", timeout=IPTVV_CLOUDFLARE_WAIT_SECONDS)
             except:
                 pass
 
@@ -427,7 +527,7 @@ def navigate_to_cart_and_get_free_trial(driver):
         print("[!] 'Get Free Trial' link not found")
         # Try direct URL for adding product to cart
         print("[*] Trying direct add-to-cart URL...")
-        driver.get("https://iptvv.ca/?add-to-cart=7758")
+        driver.get(f"{IPTVV_BASE_URL}/?add-to-cart=7758")
         time.sleep(8)  # Wait longer for product to be added
         print(f"[*] After add-to-cart URL: {driver.current_url}")
 
@@ -449,18 +549,7 @@ def navigate_to_cart_and_get_free_trial(driver):
 
         print(f"[*] Checkout URL: {driver.current_url}")
         print(f"[*] Page title: {driver.title}")
-
-        # Check if we actually have checkout form elements
-        try:
-            driver.find_element(By.ID, "billing_email")
-            print("[*] Billing email field detected - form is loaded")
-        except:
-            print("[!] WARNING: Billing email field NOT found - form may not have loaded")
-            # Try scrolling to trigger lazy loading
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(3)
-            driver.execute_script("window.scrollTo(0, 0);")
-            time.sleep(3)
+        wait_for_real_checkout_page(driver, "direct add-to-cart flow", timeout=IPTVV_CLOUDFLARE_WAIT_SECONDS)
 
 
 def select_full_channel_package(driver):
@@ -531,14 +620,8 @@ def fill_checkout_form(driver, email_address):
     """Fill WooCommerce checkout form with generated data and mail.tm email."""
     print("[*] Filling WooCommerce checkout form...")
 
-    # Wait for checkout form to be fully loaded
-    try:
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.ID, "billing_email"))
-        )
-        time.sleep(2)  # Extra time for all form fields to render
-    except:
-        print("[!] Warning: Checkout form may not be fully loaded")
+    wait_for_real_checkout_page(driver, "form fill step", timeout=IPTVV_CLOUDFLARE_WAIT_SECONDS)
+    time.sleep(2)  # Extra time for all form fields to render
 
     user_data = generate_random_user_data()
     user_data["email"] = email_address
@@ -765,6 +848,7 @@ def solve_recaptcha_v2(driver, timeout=120, max_retries=2):
 def submit_checkout_form(driver):
     """Submit the WooCommerce checkout form."""
     print("[*] Submitting WooCommerce checkout form...")
+    wait_for_real_checkout_page(driver, "submit step", timeout=IPTVV_CLOUDFLARE_WAIT_SECONDS)
 
     # Solve CAPTCHA if present
     if not solve_recaptcha_v2(driver):
