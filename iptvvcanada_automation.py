@@ -6,7 +6,6 @@ and extracts Xtream credentials from the received email.
 
 Install deps: pip install selenium webdriver-manager 2captcha-python python-dotenv requests
 """
-
 import argparse
 import html
 import json
