@@ -233,6 +233,16 @@ def get_driver():
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
+        # Additional options for better JavaScript rendering in headless mode
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-web-security")
+        options.add_argument("--allow-running-insecure-content")
+        options.add_argument("--ignore-certificate-errors")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+        # Set a realistic user agent
+        options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         print("[*] Running in HEADLESS mode")
     else:
         options.add_argument("--start-maximized")
@@ -374,8 +384,12 @@ def navigate_to_cart_and_get_free_trial(driver):
         # Navigate to checkout
         checkout_url = f"{IPTVV_BASE_URL}/checkout/"
         driver.get(checkout_url)
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        time.sleep(3)
+        # Wait for page to fully load including JavaScript
+        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        time.sleep(5)  # Extra time for WooCommerce JavaScript to initialize
+
+        # Execute JavaScript to ensure the page is fully rendered
+        driver.execute_script("return document.readyState") == "complete"
         print(f"[*] Checkout URL: {driver.current_url}")
 
 
@@ -446,6 +460,15 @@ def select_full_channel_package(driver):
 def fill_checkout_form(driver, email_address):
     """Fill WooCommerce checkout form with generated data and mail.tm email."""
     print("[*] Filling WooCommerce checkout form...")
+
+    # Wait for checkout form to be fully loaded
+    try:
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.ID, "billing_email"))
+        )
+        time.sleep(2)  # Extra time for all form fields to render
+    except:
+        print("[!] Warning: Checkout form may not be fully loaded")
 
     user_data = generate_random_user_data()
     user_data["email"] = email_address
