@@ -14,7 +14,7 @@ import random
 import re
 import string
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 from dotenv import load_dotenv
 from selenium import webdriver
@@ -378,7 +378,7 @@ def is_cloudflare_block_page(driver):
 
 def save_page_debug_artifacts(driver, label):
     """Save a screenshot and HTML snapshot for production diagnosis."""
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "_", label).strip("_") or "page"
     base_path = f"/tmp/iptvv_{safe_label}_{timestamp}"
 
@@ -1120,25 +1120,20 @@ def main(user_id=None, callback_url=None):
     print(f"[*] Laravel integration mode: {is_laravel_mode}")
     print("=" * 60 + "\n")
 
-    # Step 1: Create mail.tm account
-    email_address, email_password, auth_token = create_mailtm_account()
-    if not email_address:
-        error_msg = "Failed to create mail.tm temporary email account"
-        print(f"[!] {error_msg}")
-        if is_laravel_mode:
-            send_webhook_callback(callback_url, user_id, "failed", error=error_msg)
-        send_telegram_notification("error", error_msg, None)
-        raise SystemExit(1)
-
     try:
-        # Step 2: Initialize browser
+        # Step 1: Initialize browser and confirm IPTVV checkout is reachable.
         driver = get_driver()
 
-        # Step 3: Navigate to cart and start trial process
+        # Step 2: Navigate to cart and start trial process.
         navigate_to_cart_and_get_free_trial(driver)
 
-        # Step 4: Select full channel package
+        # Step 3: Select full channel package.
         select_full_channel_package(driver)
+
+        # Step 4: Create mail.tm account only after the checkout form is reachable.
+        email_address, email_password, auth_token = create_mailtm_account()
+        if not email_address:
+            raise RuntimeError("Failed to create mail.tm temporary email account")
 
         # Step 5: Fill checkout form with mail.tm email
         fill_checkout_form(driver, email_address)
