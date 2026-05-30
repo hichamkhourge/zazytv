@@ -382,6 +382,7 @@ def save_page_debug_artifacts(driver, label):
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "_", label).strip("_") or "page"
     debug_dir = IPTVV_DEBUG_DIR
+    artifacts = {}
     try:
         os.makedirs(debug_dir, exist_ok=True)
     except Exception as exc:
@@ -394,6 +395,7 @@ def save_page_debug_artifacts(driver, label):
         screenshot_path = f"{base_path}.png"
         driver.save_screenshot(screenshot_path)
         print(f"[*] Screenshot saved to: {screenshot_path}")
+        artifacts["screenshot"] = screenshot_path
     except Exception as exc:
         print(f"[!] Could not save screenshot: {exc}")
 
@@ -402,8 +404,54 @@ def save_page_debug_artifacts(driver, label):
         with open(html_path, "w", encoding="utf-8") as fh:
             fh.write(driver.page_source)
         print(f"[*] HTML snapshot saved to: {html_path}")
+        artifacts["html"] = html_path
     except Exception as exc:
         print(f"[!] Could not save HTML snapshot: {exc}")
+
+    return artifacts
+
+
+def get_public_ip():
+    """Best-effort public IP lookup for Cloudflare allowlist/support tickets."""
+    try:
+        response = requests.get("https://api.ipify.org", timeout=8)
+        response.raise_for_status()
+        return response.text.strip()
+    except Exception as exc:
+        print(f"[!] Could not fetch public IP: {exc}")
+        return "unknown"
+
+
+def extract_cloudflare_diagnostics(driver):
+    """Extract useful Cloudflare details from the block page."""
+    source = driver.page_source or ""
+    page_text = html.unescape(re.sub(r"<[^>]+>", " ", source))
+    page_text = re.sub(r"\s+", " ", page_text).strip()
+
+    ray_id = "unknown"
+    ray_match = re.search(r"Ray ID:?\s*([0-9a-fA-F]{12,})", page_text)
+    if ray_match:
+        ray_id = ray_match.group(1)
+
+    reason = "Cloudflare/WAF block page"
+    reason_patterns = [
+        r"You are unable to access[^.]*\.?",
+        r"Sorry, you have been blocked\.?",
+        r"Attention Required![^.]*\.?",
+        r"Access denied\.?",
+    ]
+    for pattern in reason_patterns:
+        match = re.search(pattern, page_text, flags=re.IGNORECASE)
+        if match:
+            reason = match.group(0).strip()
+            break
+
+    return {
+        "ray_id": ray_id,
+        "reason": reason,
+        "url": driver.current_url,
+        "title": driver.title,
+    }
 
 
 def wait_for_real_checkout_page(driver, context, timeout=30):
@@ -432,17 +480,27 @@ def wait_for_real_checkout_page(driver, context, timeout=30):
             time.sleep(1)
 
     if cloudflare_seen or is_cloudflare_block_page(driver):
-        save_page_debug_artifacts(driver, "cloudflare_block")
+        artifacts = save_page_debug_artifacts(driver, "cloudflare_block")
+        diagnostics = extract_cloudflare_diagnostics(driver)
+        public_ip = get_public_ip()
+        print(f"[!] Cloudflare Ray ID: {diagnostics['ray_id']}")
+        print(f"[!] Cloudflare reason: {diagnostics['reason']}")
+        print(f"[!] Production public IP: {public_ip}")
         raise CloudflareBlockedError(
             "IPTVV checkout is blocked by Cloudflare/WAF in this production container. "
-            "The checkout form never loaded; allowlist the production IP/session with IPTVV/Cloudflare "
-            "or run this provider from a trusted browser environment."
+            "The checkout form never loaded. "
+            f"Public IP: {public_ip}; Cloudflare Ray ID: {diagnostics['ray_id']}; "
+            f"debug HTML: {artifacts.get('html', 'not saved')}; "
+            f"screenshot: {artifacts.get('screenshot', 'not saved')}. "
+            "Ask IPTVV/Cloudflare to allowlist this server or provide an approved API/integration path."
         )
 
-    save_page_debug_artifacts(driver, "checkout_not_loaded")
+    artifacts = save_page_debug_artifacts(driver, "checkout_not_loaded")
     raise RuntimeError(
         f"IPTVV checkout form did not load after {context}. "
-        f"Current URL: {driver.current_url}; title: {driver.title}"
+        f"Current URL: {driver.current_url}; title: {driver.title}; "
+        f"debug HTML: {artifacts.get('html', 'not saved')}; "
+        f"screenshot: {artifacts.get('screenshot', 'not saved')}"
     )
 
 
