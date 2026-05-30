@@ -50,6 +50,7 @@ AUTO_EXIT = os.getenv("AUTO_EXIT", "True").lower() == "true"
 IPTVV_PAGE_LOAD_RETRIES = int(os.getenv("IPTVV_PAGE_LOAD_RETRIES", "2"))
 IPTVV_CLOUDFLARE_WAIT_SECONDS = int(os.getenv("IPTVV_CLOUDFLARE_WAIT_SECONDS", "45"))
 IPTVV_DEBUG_DIR = os.getenv("IPTVV_DEBUG_DIR", "/app/logs")
+IPTVV_PROXY_CHECK_URL = os.getenv("IPTVV_PROXY_CHECK_URL", "https://api.ipify.org")
 
 CREDENTIALS_EMAIL_SUBJECT = "Your trial is now active"
 solver = TwoCaptcha(TWOCAPTCHA_API_KEY) if TWOCAPTCHA_API_KEY else None
@@ -452,6 +453,97 @@ def extract_cloudflare_diagnostics(driver):
         "url": driver.current_url,
         "title": driver.title,
     }
+
+
+def get_browser_public_ip(driver):
+    """Fetch public IP from inside Chrome to verify VPN/browser egress."""
+    original_url = driver.current_url
+    try:
+        driver.get(IPTVV_PROXY_CHECK_URL)
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        browser_ip = driver.find_element(By.TAG_NAME, "body").text.strip()
+        browser_ip = re.sub(r"\s+", " ", browser_ip)
+        if browser_ip:
+            return browser_ip
+        return "unknown"
+    except Exception as exc:
+        print(f"[!] Could not fetch browser public IP from {IPTVV_PROXY_CHECK_URL}: {exc}")
+        return "unknown"
+    finally:
+        if original_url and original_url != "data:,":
+            try:
+                driver.get(original_url)
+            except Exception:
+                pass
+
+
+def preflight_checkout_access():
+    """Check whether the current prod egress can reach the real IPTVV checkout."""
+    driver = None
+    checkout_url = f"{IPTVV_BASE_URL}/checkout/"
+
+    print("\n" + "=" * 60)
+    print("IPTVV CANADA - CHECKOUT PREFLIGHT")
+    print("=" * 60)
+    print(f"[*] Checkout URL: {checkout_url}")
+    print(f"[*] Debug directory: {IPTVV_DEBUG_DIR}")
+    print("=" * 60 + "\n")
+
+    try:
+        server_ip = get_public_ip()
+        print(f"[*] Server public IP: {server_ip}")
+
+        driver = get_driver()
+        browser_ip = get_browser_public_ip(driver)
+        print(f"[*] Browser-visible public IP: {browser_ip}")
+        if server_ip != "unknown" and browser_ip != "unknown" and server_ip == browser_ip:
+            print("[*] Browser IP matches server IP; this is expected for full-system VPN egress.")
+
+        print(f"[*] Opening checkout: {checkout_url}")
+        driver.get(checkout_url)
+        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        time.sleep(3)
+
+        artifacts = save_page_debug_artifacts(driver, "preflight_checkout")
+        print(f"[*] Checkout URL after load: {driver.current_url}")
+        print(f"[*] Page title: {driver.title}")
+
+        if is_cloudflare_block_page(driver):
+            diagnostics = extract_cloudflare_diagnostics(driver)
+            print(f"[!] Cloudflare Ray ID: {diagnostics['ray_id']}")
+            print(f"[!] Cloudflare reason: {diagnostics['reason']}")
+            raise CloudflareBlockedError(
+                "Preflight failed: IPTVV checkout is blocked by Cloudflare/WAF. "
+                f"Server IP: {server_ip}; browser IP: {browser_ip}; "
+                f"Cloudflare Ray ID: {diagnostics['ray_id']}; "
+                f"debug HTML: {artifacts.get('html', 'not saved')}; "
+                f"screenshot: {artifacts.get('screenshot', 'not saved')}."
+            )
+
+        try:
+            driver.find_element(By.ID, "billing_email")
+        except Exception:
+            raise RuntimeError(
+                "Preflight failed: Cloudflare block was not detected, but billing_email is missing. "
+                f"Server IP: {server_ip}; browser IP: {browser_ip}; "
+                f"debug HTML: {artifacts.get('html', 'not saved')}; "
+                f"screenshot: {artifacts.get('screenshot', 'not saved')}."
+            )
+
+        print("[OK] Preflight passed: IPTVV checkout form is reachable.")
+        print(f"[OK] Server IP: {server_ip}")
+        print(f"[OK] Browser-visible IP: {browser_ip}")
+        print(f"[OK] Debug HTML: {artifacts.get('html', 'not saved')}")
+        print(f"[OK] Screenshot: {artifacts.get('screenshot', 'not saved')}")
+        return True
+
+    finally:
+        if driver:
+            try:
+                driver.quit()
+                print("[*] Browser closed")
+            except Exception:
+                pass
 
 
 def wait_for_real_checkout_page(driver, context, timeout=30):
@@ -1298,11 +1390,27 @@ if __name__ == "__main__":
         epilog="""
 Examples:
   python iptvvcanada_automation.py
+  python iptvvcanada_automation.py --preflight-only
   python iptvvcanada_automation.py --user-id 123 --callback-url https://app.com/api/webhooks/iptvv-automation
         """,
+    )
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Only verify IPTVV checkout reachability and browser egress; do not create a trial",
     )
     parser.add_argument("--user-id", type=int, help="Laravel IPTV account ID")
     parser.add_argument("--callback-url", type=str, help="Webhook callback URL")
     args = parser.parse_args()
 
-    main(user_id=args.user_id, callback_url=args.callback_url)
+    if args.preflight_only:
+        try:
+            preflight_checkout_access()
+        except Exception as exc:
+            import traceback
+            error_traceback = traceback.format_exc()
+            print(f"\n[!] IPTVV Canada preflight failed: {exc}")
+            print(error_traceback)
+            raise SystemExit(1)
+    else:
+        main(user_id=args.user_id, callback_url=args.callback_url)

@@ -42,13 +42,11 @@ HEADLESS=True                         # Set to False for GUI mode
 AUTO_EXIT=True                        # Close browser when done
 CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
 
-# Tor integration (bypass IP-based trial limits)
-USE_TOR=False                         # Set to True to route traffic through Tor
-TOR_SOCKS_HOST=127.0.0.1             # Tor SOCKS proxy host
-TOR_SOCKS_PORT=9050                  # Tor SOCKS proxy port
-TOR_CONTROL_HOST=127.0.0.1           # Tor control port host
-TOR_CONTROL_PORT=9051                # Tor control port
-TOR_CONTROL_PASSWORD=                # Leave empty if no password set
+# IPTVV diagnostics / egress preflight
+IPTVV_DEBUG_DIR=/app/logs
+IPTVV_PROXY_CHECK_URL=https://api.ipify.org
+IPTVV_CLOUDFLARE_WAIT_SECONDS=45
+IPTVV_PAGE_LOAD_RETRIES=2
 
 # Laravel webhook integration
 WEBHOOK_AUTH_TOKEN=your_bearer_token
@@ -60,6 +58,16 @@ TELEGRAM_CHAT_ID=your_chat_id
 ```
 
 ## Usage
+
+### Production Egress Preflight
+
+Run this before creating real trial accounts, especially when testing free VPN/VPS egress options:
+
+```bash
+python iptvvcanada_automation.py --preflight-only
+```
+
+The preflight opens `https://iptvv.ca/checkout/`, prints both the server public IP and browser-visible public IP, saves HTML/screenshot artifacts to `IPTVV_DEBUG_DIR`, and exits successfully only when the WooCommerce `billing_email` field is present.
 
 ### Standalone Mode (No Laravel)
 

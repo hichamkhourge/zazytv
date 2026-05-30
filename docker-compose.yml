@@ -53,6 +53,12 @@ services:
       # Timezone for cron
       - TZ=${TZ:-UTC}
 
+      # IPTVV Canada diagnostics / egress preflight
+      - IPTVV_DEBUG_DIR=${IPTVV_DEBUG_DIR:-/app/logs}
+      - IPTVV_PROXY_CHECK_URL=${IPTVV_PROXY_CHECK_URL:-https://api.ipify.org}
+      - IPTVV_CLOUDFLARE_WAIT_SECONDS=${IPTVV_CLOUDFLARE_WAIT_SECONDS:-45}
+      - IPTVV_PAGE_LOAD_RETRIES=${IPTVV_PAGE_LOAD_RETRIES:-2}
+
     volumes:
       # Persistent storage for playlists
       - zazy-playlists:/app/playlists
@@ -66,6 +72,7 @@ services:
 
       # Optional: Mount logs
       - zazy-logs:/var/log
+      - zazy-logs:/app/logs
 
     networks:
       - zazy-network
