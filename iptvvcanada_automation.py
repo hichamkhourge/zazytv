@@ -49,6 +49,7 @@ EMAIL_MAX_WAIT_SECONDS = int(os.getenv("IPTVV_EMAIL_MAX_WAIT_SECONDS", "2700")) 
 AUTO_EXIT = os.getenv("AUTO_EXIT", "True").lower() == "true"
 IPTVV_PAGE_LOAD_RETRIES = int(os.getenv("IPTVV_PAGE_LOAD_RETRIES", "2"))
 IPTVV_CLOUDFLARE_WAIT_SECONDS = int(os.getenv("IPTVV_CLOUDFLARE_WAIT_SECONDS", "45"))
+IPTVV_DEBUG_DIR = os.getenv("IPTVV_DEBUG_DIR", "/app/logs")
 
 CREDENTIALS_EMAIL_SUBJECT = "Your trial is now active"
 solver = TwoCaptcha(TWOCAPTCHA_API_KEY) if TWOCAPTCHA_API_KEY else None
@@ -380,7 +381,14 @@ def save_page_debug_artifacts(driver, label):
     """Save a screenshot and HTML snapshot for production diagnosis."""
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "_", label).strip("_") or "page"
-    base_path = f"/tmp/iptvv_{safe_label}_{timestamp}"
+    debug_dir = IPTVV_DEBUG_DIR
+    try:
+        os.makedirs(debug_dir, exist_ok=True)
+    except Exception as exc:
+        print(f"[!] Could not create debug directory {debug_dir}: {exc}")
+        debug_dir = "/tmp"
+
+    base_path = os.path.join(debug_dir, f"iptvv_{safe_label}_{timestamp}")
 
     try:
         screenshot_path = f"{base_path}.png"

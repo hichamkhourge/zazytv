@@ -63,7 +63,7 @@ COPY README_IPTVVCANADA.md .
 COPY automation_api/ ./automation_api/
 
 # Create necessary directories
-RUN mkdir -p /app/playlists /app/ugeen_sessions /app/ugeen_data /var/log
+RUN mkdir -p /app/playlists /app/ugeen_sessions /app/ugeen_data /app/logs /var/log
 
 # Copy crontab file
 COPY crontab /etc/cron.d/zazy-cron
