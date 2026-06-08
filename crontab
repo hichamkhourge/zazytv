@@ -8,7 +8,9 @@
 0 3 * * * cd /app && /usr/local/bin/python /app/zazy_playlist_automation.py >> /var/log/cron.log 2>&1
 
 # UGEEN Multi-Account Automation - Runs every day at 6:00 AM (all 3 accounts)
-0 6 * * * cd /app && /usr/local/bin/python /app/ugeen_multi_account.py >> /var/log/cron.log 2>&1
+0 6 * * * cd /app && /usr/local/bin/python /app/ugeen_api_scraper.py >> /var/log/cron.log 2>&1
+0 7 * * * cd /app && /usr/local/bin/python /app/ugeen_api_scraper.py --username hichamhke@gmail.com --password C5iH8@JNzq2wyeT  >> /var/log/cron.log 2>&1
+0 8 * * * cd /app && /usr/local/bin/python /app/ugeen_api_scraper.py --username khourgehicham@gmail.com --password BkcwV4nGRibhA@J >> /var/log/cron.log 2>&1
 
 # UZEEN Playlist Updater - Runs every day at 4:00 PM
 0 16 * * * cd /app && /usr/local/bin/python /app/uzeen_playlist_updater.py >> /var/log/cron.log 2>&1
