@@ -13,6 +13,8 @@ RUN apt-get update && apt-get install -y \
     curl \
     unzip \
     xvfb \
+    tor \
+    obfs4proxy \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Google Chrome
@@ -38,6 +40,12 @@ RUN CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d. -f1-3)
 # Set ChromeDriver path environment variable
 ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
 
+# Configure Tor
+RUN echo "SocksPort 0.0.0.0:9050" >> /etc/tor/torrc && \
+    echo "ControlPort 9051" >> /etc/tor/torrc && \
+    echo "CookieAuthentication 0" >> /etc/tor/torrc && \
+    echo "HashedControlPassword 16:872860B76453A77D60CA2BB8C1A7042072093276A3D701AD684053EC4C" >> /etc/tor/torrc
+
 # Create app directory
 WORKDIR /app
 
@@ -52,6 +60,7 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 COPY zazy_playlist_automation.py .
 COPY layerseven_automation.py .
 COPY ugeen_api_scraper.py .
+COPY ugeen_multi_account.py .
 COPY iptvvcanada_automation.py .
 COPY telegram_notifier.py .
 COPY api_server.py .
