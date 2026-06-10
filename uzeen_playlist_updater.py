@@ -103,20 +103,22 @@ def is_xtream_codes_url(url):
     return False
 
 
-def fetch_first_channel(m3u_url):
+def iter_channel_urls(m3u_url):
     """
-    Fetch the first channel from an M3U file using streaming to handle large files.
+    Stream an M3U file and yield channel stream URLs one at a time.
 
-    Returns the first stream URL following an #EXTINF entry, regardless of format. For the
-    Uzeen M3U this is a proxy URL (e.g. https://www.uzeen.net/api/stream/<token>/<id>) that
-    redirects to the real Xtream server; redirect resolution happens later in
-    resolve_xtream_credentials().
+    Yields the stream URL following each #EXTINF entry, regardless of format. For the Uzeen
+    M3U these are proxy URLs (e.g. https://www.uzeen.net/api/stream/<token>/<id>) that
+    redirect to the real Xtream server; redirect resolution happens in
+    resolve_xtream_credentials(). Yielding lazily lets the caller stop as soon as a channel
+    resolves to credentials, without downloading the whole (potentially huge) M3U or capping
+    the number of channels tried.
 
     Args:
         m3u_url: URL to the M3U file
 
-    Returns:
-        tuple: (extinf_line, stream_url) or (None, None) if failed
+    Yields:
+        str: Each channel stream URL, in M3U order.
     """
     print(f"\n[*] Fetching M3U file from: {m3u_url}")
 
@@ -146,12 +148,12 @@ def fetch_first_channel(m3u_url):
         response.raise_for_status()
 
         print("[✓] Connected! Starting to parse M3U file (streaming mode)...")
-        print("[*] Searching for first channel stream URL...")
+        print("[*] Yielding channel stream URLs until one resolves...")
 
         extinf_line = None
-        stream_url = None
         found_extm3u = False
         line_count = 0
+        channel_count = 0
 
         # Process line by line
         for raw_line in response.iter_lines():
@@ -181,36 +183,27 @@ def fetch_first_channel(m3u_url):
                 extinf_line = line
                 continue
 
-            # Get the stream URL (first non-comment line after EXTINF), any format.
+            # Yield the stream URL (first non-comment line after EXTINF), any format.
             # Redirect resolution to the real Xtream server happens in
             # resolve_xtream_credentials().
             if extinf_line and not line.startswith("#"):
-                stream_url = line
-                print(f"[*] Found first channel after {line_count} lines")
-                print(f"[*] Channel: {extinf_line[:80]}...")
-                print(f"[*] Stream URL: {stream_url}")
-                break
+                channel_count += 1
+                print(f"[*] Channel {channel_count}: {line}")
+                extinf_line = None  # Reset to pair the next #EXTINF
+                yield line
 
         if not found_extm3u:
             print("[!] Invalid M3U file: Missing #EXTM3U header")
-            return (None, None)
-
-        if not extinf_line or not stream_url:
-            print(f"[!] Could not find a channel stream URL in M3U file")
+        elif channel_count == 0:
+            print(f"[!] Could not find any channel stream URL in M3U file")
             print(f"[!] Parsed {line_count} lines")
-            return (None, None)
-
-        print(f"[✓] Successfully found first channel in M3U file")
-        return (extinf_line, stream_url)
 
     except requests.exceptions.RequestException as e:
         print(f"[!] Failed to fetch M3U file: {e}")
-        return (None, None)
     except Exception as e:
         print(f"[!] Unexpected error while parsing M3U: {e}")
         import traceback
         traceback.print_exc()
-        return (None, None)
 
 
 def extract_credentials_from_url(stream_url):
@@ -553,16 +546,20 @@ def main():
     if not validate_config():
         return 1
 
-    # Fetch first channel from M3U file
-    extinf_line, channel_url = fetch_first_channel(UZEEN_M3U_URL)
-    if not channel_url:
-        print("[!] Failed to fetch first channel from M3U file")
-        return 1
+    # Stream channel URLs from the M3U and follow each one's redirect until one resolves
+    # to Xtream credentials. This keeps trying (no limit) and falls back to the next
+    # channel whenever an entry does not redirect (e.g. a direct VOD file with no
+    # credentials), stopping as soon as a good URL is found.
+    credentials = None
+    for i, channel_url in enumerate(iter_channel_urls(UZEEN_M3U_URL), 1):
+        print(f"\n[*] Trying channel {i}...")
+        credentials = resolve_xtream_credentials(channel_url)
+        if credentials:
+            break
+        print(f"[!] Channel {i} did not resolve to Xtream credentials - trying next...")
 
-    # Follow the channel URL's redirect to resolve the real Xtream credentials
-    credentials = resolve_xtream_credentials(channel_url)
     if not credentials:
-        print("[!] Failed to resolve Xtream credentials from channel redirect")
+        print("[!] Failed to resolve Xtream credentials from any channel in the M3U")
         return 1
 
     # Load last known state
