@@ -5,7 +5,7 @@
 # Core automation dependencies
 selenium==4.41.0
 webdriver-manager==4.0.2
-undetected-chromedriver>=3.5.9
+undetected-chromedriver==3.5.5
 
 # 2captcha for automatic reCAPTCHA solving
 2captcha-python==2.0.5
