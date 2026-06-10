@@ -4,6 +4,7 @@ Telegram Notification Module for Zazy Playlist Automation
 Sends notifications to Telegram when the automation script completes or encounters errors.
 """
 
+import html
 import os
 import requests
 from typing import Optional, Dict, Any
@@ -48,15 +49,16 @@ class TelegramNotifier:
             return False
 
         try:
-            # Build message
+            # Build message. Escape dynamic content so HTML-like text (e.g. selenium
+            # stacktraces containing <unknown>) does not break Telegram's HTML parser.
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             full_message = f"🤖 <b>Zazy Automation</b>\n\n"
-            full_message += f"<b>{status}</b>\n"
+            full_message += f"<b>{html.escape(str(status))}</b>\n"
             full_message += f"<i>{timestamp}</i>\n\n"
-            full_message += f"{message}"
+            full_message += f"{html.escape(str(message))}"
 
             if details:
-                full_message += f"\n\n<b>Details:</b>\n<code>{details}</code>"
+                full_message += f"\n\n<b>Details:</b>\n<code>{html.escape(str(details))}</code>"
 
             # Prepare payload
             payload = {

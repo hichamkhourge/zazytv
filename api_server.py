@@ -23,6 +23,7 @@ SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "zazy_playlist_automation.
 UGEEN_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "ugeen_api_scraper.py")
 UGEEN_RENEW_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "ugeen_renew_user.py")
 LAYERSEVEN_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "layerseven_automation.py")
+IPTVTUNE_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "iptvtune_automation.py")
 
 
 def verify_api_key():
@@ -513,6 +514,144 @@ def generate_layerseven_sync():
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+def run_iptvtune_script(user_id=None, callback_url=None, bouquets=None):
+    """
+    Run the IPTVtune automation script in a separate process.
+
+    Args:
+        user_id: Laravel IPTV account ID
+        callback_url: Webhook callback URL
+        bouquets: List of bouquet IDs to select
+    """
+    try:
+        cmd = [sys.executable, IPTVTUNE_SCRIPT_PATH]
+
+        if user_id:
+            cmd.extend(['--user-id', str(user_id)])
+
+        if callback_url:
+            cmd.extend(['--callback-url', callback_url])
+
+        if bouquets:
+            # Convert list of bouquet IDs to comma-separated string
+            bouquet_str = ','.join(str(bid) for bid in bouquets)
+            cmd.extend(['--bouquets', bouquet_str])
+
+        print(f"[*] Running IPTVtune command: {' '.join(cmd)}")
+
+        # IPTVtune polls the client area for the credentials email for up to 1 hour
+        # (IPTVTUNE_EMAIL_MAX_WAIT_SECONDS), so allow ~70 min including the order phase.
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=4200
+        )
+
+        print(f"[*] IPTVtune script completed with return code: {result.returncode}")
+        print(f"[*] STDOUT: {result.stdout[-500:]}")
+
+        if result.returncode != 0:
+            print(f"[!] STDERR: {result.stderr[-500:]}")
+
+        return {
+            'success': result.returncode == 0,
+            'return_code': result.returncode,
+            'output': result.stdout[-1000:] if result.stdout else None,
+            'error': result.stderr[-1000:] if result.stderr else None
+        }
+
+    except subprocess.TimeoutExpired:
+        print("[!] IPTVtune script execution timed out after 70 minutes")
+        return {
+            'success': False,
+            'error': 'IPTVtune script execution timed out after 70 minutes'
+        }
+    except Exception as e:
+        print(f"[!] Error running IPTVtune script: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+
+@app.route('/api/generate/iptvtune', methods=['POST'])
+def generate_iptvtune():
+    """
+    Trigger IPTVtune free-trial account generation.
+
+    Request body:
+    {
+        "user_id": 123,
+        "callback_url": "https://your-app.com/api/webhooks/iptvtune-automation",
+        "bouquets": [1, 3, 60, 63]  // Optional - specific bouquet IDs to select
+    }
+    """
+    print("[WARNING] API key verification is DISABLED - for testing only!")
+
+    try:
+        data = request.get_json() or {}
+        user_id = data.get('user_id')
+        callback_url = data.get('callback_url')
+        bouquets = data.get('bouquets')  # Optional list of bouquet IDs
+
+        print(f"[*] Received IPTVtune request: user_id={user_id}, callback_url={callback_url}, bouquets={bouquets}")
+
+        def run_in_background():
+            run_iptvtune_script(user_id=user_id, callback_url=callback_url, bouquets=bouquets)
+
+        thread = threading.Thread(target=run_in_background, daemon=True)
+        thread.start()
+
+        return jsonify({
+            'status': 'started',
+            'message': 'IPTVtune automation started in background. Results will be sent to callback URL if provided.',
+            'user_id': user_id,
+            'estimated_time': 'usually ~5 minutes, up to ~1 hour (credentials delivery)'
+        }), 202
+
+    except Exception as e:
+        print(f"[!] Error in generate_iptvtune endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/generate/iptvtune/sync', methods=['POST'])
+def generate_iptvtune_sync():
+    """
+    Trigger IPTVtune account generation synchronously.
+
+    Request body:
+    {
+        "user_id": 123,
+        "callback_url": "https://your-app.com/api/webhooks/iptvtune-automation",
+        "bouquets": [1, 3, 60, 63]  // Optional - specific bouquet IDs to select
+    }
+    """
+    print("[WARNING] API key verification is DISABLED - for testing only!")
+
+    try:
+        data = request.get_json() or {}
+        user_id = data.get('user_id')
+        callback_url = data.get('callback_url')
+        bouquets = data.get('bouquets')  # Optional list of bouquet IDs
+        result = run_iptvtune_script(user_id=user_id, callback_url=callback_url, bouquets=bouquets)
+
+        return jsonify({
+            'status': 'completed' if result['success'] else 'failed',
+            'result': result
+        }), 200 if result['success'] else 500
+
+    except Exception as e:
+        print(f"[!] Error in generate_iptvtune_sync endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 8899))

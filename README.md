@@ -14,6 +14,17 @@ Automated playlist creation and service activation for Zazy TV and UGEEN.LIVE. T
 - **M3U Download**: Downloads playlist file to local `playlists/` directory with timestamp
 - **Browser Automation**: Uses Selenium with Chrome for reliable browser-based automation
 
+### IPTVtune Free Trial Automation
+- **WHMCS Checkout Automation**: Orders the free "1 Day Free Trial" product at `https://iptvtune.com/pay/` (`cart.php?a=confproduct&i=0`) — same engine as LayerSeven
+- **reCAPTCHA Solving**: Solves reCAPTCHA v2 via 2captcha when present on checkout
+- **Bouquet Selection**: Selects all bouquets by default (`IPTVTUNE_BOUQUET_MODE=all`); `--bouquets 1,3,60,63` selects specific ones
+- **Credential Extraction**: After ordering, keeps the browser open and polls the client-area email history (`clientarea.php?action=emails`) until the account-ready email arrives, then extracts Xtream username, password, and portal URL and builds the M3U URL
+- **IBO Player Update** (optional): pushes the extracted credentials into an existing IBO Player playlist via `savePlaylist`. Enable with `IPTVTUNE_IBOPLAYER_ENABLED=True` and set `IPTVTUNE_IBOPLAYER_COOKIE` + `IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID` (+ optional `IPTVTUNE_IBOPLAYER_PLAYLIST_NAME`)
+- **Outputs**: Webhook callback (Laravel mode) or Telegram notification
+- **Config**: `IPTVTUNE_*` keys in `.env` (see `.env.example`). In practice the trial email lands in ~3 min; the default waits up to 1 hour (`IPTVTUNE_EMAIL_MAX_WAIT_SECONDS=3600`) polling once a minute (`IPTVTUNE_EMAIL_POLL_SECONDS=60`), since IPTVtune advertises "within 1-3 hours". `IPTVTUNE_READY_EMAIL_SUBJECT` defaults to the verified subject `IPTV Access Information`.
+- **API**: `POST /api/generate/iptvtune` and `/api/generate/iptvtune/sync` (both accept an optional `bouquets` array)
+- **Schedule**: `iptvtune_scheduler.sh` (20 h success / 1 h retry) and a daily 7:00 AM `crontab` entry
+
 ### UGEEN API Scraper
 - **Stealth Browser Automation**: Uses undetected-chromedriver for anti-detection
 - **Session Management**: Saves and reuses JWT tokens for efficiency
