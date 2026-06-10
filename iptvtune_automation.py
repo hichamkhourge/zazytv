@@ -57,7 +57,7 @@ AUTO_EXIT = os.getenv("AUTO_EXIT", "True").lower() == "true"
 # IBO Player playlist update (optional): push the extracted Xtream credentials into an
 # existing IBO Player playlist via their savePlaylist API.
 IPTVTUNE_IBOPLAYER_ENABLED = os.getenv("IPTVTUNE_IBOPLAYER_ENABLED", "False").lower() == "true"
-IPTVTUNE_IBOPLAYER_COOKIE = os.getenv("IPTVTUNE_IBOPLAYER_COOKIE", "")
+IBOPLAYER_COOKIE = os.getenv("IBOPLAYER_COOKIE", "")
 IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID = os.getenv("IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID", "")
 IPTVTUNE_IBOPLAYER_PLAYLIST_NAME = os.getenv("IPTVTUNE_IBOPLAYER_PLAYLIST_NAME", "iptvtune")
 
@@ -983,16 +983,16 @@ def save_to_iboplayer(username, password, hostname, max_retries=3):
         print("[*] IBO Player integration is disabled (IPTVTUNE_IBOPLAYER_ENABLED=False)")
         return False
 
-    if not IPTVTUNE_IBOPLAYER_COOKIE or not IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID:
+    if not IBOPLAYER_COOKIE or not IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID:
         print("[!] IBO Player integration enabled but missing required credentials:")
-        print(f"    - IPTVTUNE_IBOPLAYER_COOKIE: {'Set' if IPTVTUNE_IBOPLAYER_COOKIE else 'Missing'}")
+        print(f"    - IBOPLAYER_COOKIE: {'Set' if IBOPLAYER_COOKIE else 'Missing'}")
         print(f"    - IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID: {'Set' if IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID else 'Missing'}")
         return False
 
     api_url = "https://iboplayer.com/frontend/device/savePlaylist"
     headers = {
         "Content-Type": "application/json",
-        "Cookie": IPTVTUNE_IBOPLAYER_COOKIE,
+        "Cookie": IBOPLAYER_COOKIE,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     }
 
