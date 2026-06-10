@@ -285,6 +285,75 @@ def extract_credentials_from_url(stream_url):
         return None
 
 
+def resolve_redirect_credentials(stream_url, original_credentials):
+    """
+    Probe the stream URL and follow HTTP redirects to discover the real Xtream server.
+
+    The host found in the M3U file is often a load-balancer / front domain that redirects
+    real stream requests to the actual Xtream server (which may use a different host and
+    different path credentials). This probes the stream URL, follows the redirect, and
+    re-parses the full credential from the final URL.
+
+    Args:
+        stream_url: The original stream URL from the M3U file
+        original_credentials: Credentials extracted from the original (front) URL
+
+    Returns:
+        dict: Resolved credentials if a redirect to a different host was found,
+              otherwise the original_credentials unchanged.
+    """
+    print(f"\n[*] Probing stream URL to detect redirect to real Xtream server...")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Connection": "keep-alive",
+        "Accept": "*/*"
+    }
+
+    response = None
+    try:
+        # stream=True ensures only headers are read; we never iterate the body.
+        response = requests.get(
+            stream_url,
+            stream=True,
+            allow_redirects=True,
+            timeout=30,
+            headers=headers
+        )
+
+        if not response.history:
+            print("[*] No redirect detected - keeping original credentials")
+            return original_credentials
+
+        print(f"[*] Followed {len(response.history)} redirect(s):")
+        for i, resp in enumerate(response.history, 1):
+            print(f"    {i}. {resp.status_code} -> {resp.url}")
+        print(f"[*] Final URL: {response.url}")
+
+        resolved = extract_credentials_from_url(response.url)
+        if not resolved:
+            print("[!] Could not parse credentials from redirected URL - keeping original")
+            return original_credentials
+
+        if resolved["host"] == original_credentials["host"]:
+            print("[*] Redirect resolved to the same host - keeping original credentials")
+            return original_credentials
+
+        print(f"[✓] Resolved real Xtream server: {resolved['host']}")
+        return resolved
+
+    except requests.exceptions.RequestException as e:
+        print(f"[!] Redirect probe failed ({e}) - keeping original credentials")
+        return original_credentials
+    except Exception as e:
+        print(f"[!] Unexpected error during redirect probe ({e}) - keeping original credentials")
+        return original_credentials
+    finally:
+        # Close without downloading the stream body.
+        if response is not None:
+            response.close()
+
+
 def load_last_state():
     """
     Load the last known playlist state from JSON file.
@@ -495,6 +564,9 @@ def main():
     if not credentials:
         print("[!] Failed to extract credentials from stream URL")
         return 1
+
+    # Follow redirects on the stream URL to resolve the real Xtream server
+    credentials = resolve_redirect_credentials(stream_url, credentials)
 
     # Load last known state
     last_state = load_last_state()
