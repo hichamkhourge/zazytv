@@ -21,7 +21,7 @@ import time
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 # Load environment variables
 load_dotenv()
@@ -98,9 +98,12 @@ def is_xtream_codes_url(url):
 
 def fetch_first_channel(m3u_url):
     """
-    Fetch the first Xtream Codes channel from an M3U file using streaming to handle large files.
+    Fetch the first channel from an M3U file using streaming to handle large files.
 
-    Skips custom API URLs (like uzeen.net's format) and finds the first proper Xtream Codes URL.
+    Returns the first stream URL following an #EXTINF entry, regardless of format. For the
+    Uzeen M3U this is a proxy URL (e.g. https://www.uzeen.net/api/stream/<token>/<id>) that
+    redirects to the real Xtream server; redirect resolution happens later in
+    resolve_xtream_credentials().
 
     Args:
         m3u_url: URL to the M3U file
@@ -136,13 +139,12 @@ def fetch_first_channel(m3u_url):
         response.raise_for_status()
 
         print("[✓] Connected! Starting to parse M3U file (streaming mode)...")
-        print("[*] Searching for first Xtream Codes channel (skipping custom API URLs)...")
+        print("[*] Searching for first channel stream URL...")
 
         extinf_line = None
         stream_url = None
         found_extm3u = False
         line_count = 0
-        skipped_urls = 0
 
         # Process line by line
         for raw_line in response.iter_lines():
@@ -150,7 +152,7 @@ def fetch_first_channel(m3u_url):
 
             # Show progress every 1000 lines
             if line_count % 1000 == 0:
-                print(f"[*] Processed {line_count} lines, skipped {skipped_urls} non-Xtream URLs, still searching...")
+                print(f"[*] Processed {line_count} lines, still searching...")
 
             if not raw_line:
                 continue
@@ -172,34 +174,26 @@ def fetch_first_channel(m3u_url):
                 extinf_line = line
                 continue
 
-            # Get the stream URL (first non-comment line after EXTINF)
+            # Get the stream URL (first non-comment line after EXTINF), any format.
+            # Redirect resolution to the real Xtream server happens in
+            # resolve_xtream_credentials().
             if extinf_line and not line.startswith("#"):
-                # Check if this is a Xtream Codes URL
-                if is_xtream_codes_url(line):
-                    stream_url = line
-                    print(f"[*] Found Xtream Codes URL after {line_count} lines (skipped {skipped_urls} non-Xtream URLs)")
-                    print(f"[*] Channel: {extinf_line[:80]}...")
-                    print(f"[*] Stream URL: {stream_url}")
-                    break
-                else:
-                    # Skip this URL and continue searching
-                    skipped_urls += 1
-                    if skipped_urls <= 5:  # Show first 5 skipped URLs
-                        print(f"[*] Skipping non-Xtream URL: {line[:60]}...")
-                    extinf_line = None  # Reset to find next channel
-                    continue
+                stream_url = line
+                print(f"[*] Found first channel after {line_count} lines")
+                print(f"[*] Channel: {extinf_line[:80]}...")
+                print(f"[*] Stream URL: {stream_url}")
+                break
 
         if not found_extm3u:
             print("[!] Invalid M3U file: Missing #EXTM3U header")
             return (None, None)
 
         if not extinf_line or not stream_url:
-            print(f"[!] Could not find Xtream Codes channel in M3U file")
-            print(f"[!] Parsed {line_count} lines, skipped {skipped_urls} non-Xtream URLs")
-            print(f"[!] Make sure the M3U file contains standard Xtream Codes URLs")
+            print(f"[!] Could not find a channel stream URL in M3U file")
+            print(f"[!] Parsed {line_count} lines")
             return (None, None)
 
-        print(f"[✓] Successfully found Xtream Codes channel in M3U file")
+        print(f"[✓] Successfully found first channel in M3U file")
         return (extinf_line, stream_url)
 
     except requests.exceptions.RequestException as e:
@@ -285,24 +279,26 @@ def extract_credentials_from_url(stream_url):
         return None
 
 
-def resolve_redirect_credentials(stream_url, original_credentials):
+def resolve_xtream_credentials(channel_url, max_hops=5):
     """
-    Probe the stream URL and follow HTTP redirects to discover the real Xtream server.
+    Resolve the real Xtream credentials by following a channel URL's redirect chain.
 
-    The host found in the M3U file is often a load-balancer / front domain that redirects
-    real stream requests to the actual Xtream server (which may use a different host and
-    different path credentials). This probes the stream URL, follows the redirect, and
-    re-parses the full credential from the final URL.
+    The Uzeen M3U contains proxy URLs (e.g. https://www.uzeen.net/api/stream/<token>/<id>)
+    that respond with a 302 redirect to the real Xtream server, which carries the
+    credentials in its path (e.g. http://abd2022.xyz/USERNAME/PASSWORD/<id>). This follows
+    the redirect(s) and parses the Xtream credentials from the target.
+
+    If the channel URL is already an Xtream Codes URL, it is parsed directly with no
+    network request (backward compatible with M3Us that carry direct Xtream URLs).
 
     Args:
-        stream_url: The original stream URL from the M3U file
-        original_credentials: Credentials extracted from the original (front) URL
+        channel_url: The first channel stream URL from the M3U file
+        max_hops: Maximum number of redirects to follow
 
     Returns:
-        dict: Resolved credentials if a redirect to a different host was found,
-              otherwise the original_credentials unchanged.
+        dict: {host, username, password, playlist_url} or None if it could not be resolved.
     """
-    print(f"\n[*] Probing stream URL to detect redirect to real Xtream server...")
+    print(f"\n[*] Resolving Xtream credentials from channel URL: {channel_url}")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -310,48 +306,45 @@ def resolve_redirect_credentials(stream_url, original_credentials):
         "Accept": "*/*"
     }
 
-    response = None
+    current = channel_url
     try:
-        # stream=True ensures only headers are read; we never iterate the body.
-        response = requests.get(
-            stream_url,
-            stream=True,
-            allow_redirects=True,
-            timeout=30,
-            headers=headers
-        )
+        for hop in range(max_hops):
+            # Stop as soon as we reach a URL that carries Xtream credentials in its path.
+            if is_xtream_codes_url(current):
+                print(f"[✓] Reached Xtream Codes URL: {current}")
+                return extract_credentials_from_url(current)
 
-        if not response.history:
-            print("[*] No redirect detected - keeping original credentials")
-            return original_credentials
+            # allow_redirects=False so we read only the Location header and never stream
+            # from the real server. stream=True + close() avoids downloading any body.
+            response = requests.get(
+                current,
+                stream=True,
+                allow_redirects=False,
+                timeout=30,
+                headers=headers
+            )
+            status = response.status_code
+            location = response.headers.get("Location")
+            response.close()
 
-        print(f"[*] Followed {len(response.history)} redirect(s):")
-        for i, resp in enumerate(response.history, 1):
-            print(f"    {i}. {resp.status_code} -> {resp.url}")
-        print(f"[*] Final URL: {response.url}")
+            if status in (301, 302, 303, 307, 308) and location:
+                next_url = urljoin(current, location)
+                print(f"[*] Hop {hop + 1}: {status} -> {next_url}")
+                current = next_url
+                continue
 
-        resolved = extract_credentials_from_url(response.url)
-        if not resolved:
-            print("[!] Could not parse credentials from redirected URL - keeping original")
-            return original_credentials
+            print(f"[!] No redirect to follow (status {status}) - could not reach an Xtream URL")
+            return None
 
-        if resolved["host"] == original_credentials["host"]:
-            print("[*] Redirect resolved to the same host - keeping original credentials")
-            return original_credentials
-
-        print(f"[✓] Resolved real Xtream server: {resolved['host']}")
-        return resolved
+        print(f"[!] Exceeded max redirects ({max_hops}) without reaching an Xtream URL")
+        return None
 
     except requests.exceptions.RequestException as e:
-        print(f"[!] Redirect probe failed ({e}) - keeping original credentials")
-        return original_credentials
+        print(f"[!] Failed to resolve Xtream credentials ({e})")
+        return None
     except Exception as e:
-        print(f"[!] Unexpected error during redirect probe ({e}) - keeping original credentials")
-        return original_credentials
-    finally:
-        # Close without downloading the stream body.
-        if response is not None:
-            response.close()
+        print(f"[!] Unexpected error while resolving Xtream credentials ({e})")
+        return None
 
 
 def load_last_state():
@@ -554,19 +547,16 @@ def main():
         return 1
 
     # Fetch first channel from M3U file
-    extinf_line, stream_url = fetch_first_channel(UZEEN_M3U_URL)
-    if not stream_url:
+    extinf_line, channel_url = fetch_first_channel(UZEEN_M3U_URL)
+    if not channel_url:
         print("[!] Failed to fetch first channel from M3U file")
         return 1
 
-    # Extract credentials from stream URL
-    credentials = extract_credentials_from_url(stream_url)
+    # Follow the channel URL's redirect to resolve the real Xtream credentials
+    credentials = resolve_xtream_credentials(channel_url)
     if not credentials:
-        print("[!] Failed to extract credentials from stream URL")
+        print("[!] Failed to resolve Xtream credentials from channel redirect")
         return 1
-
-    # Follow redirects on the stream URL to resolve the real Xtream server
-    credentials = resolve_redirect_credentials(stream_url, credentials)
 
     # Load last known state
     last_state = load_last_state()
