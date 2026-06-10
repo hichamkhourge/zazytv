@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timezone
 import requests
 from dotenv import load_dotenv
+import undetected_chromedriver as uc
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -51,13 +52,30 @@ IPTVV_PAGE_LOAD_RETRIES = int(os.getenv("IPTVV_PAGE_LOAD_RETRIES", "2"))
 IPTVV_CLOUDFLARE_WAIT_SECONDS = int(os.getenv("IPTVV_CLOUDFLARE_WAIT_SECONDS", "45"))
 IPTVV_DEBUG_DIR = os.getenv("IPTVV_DEBUG_DIR", "/app/logs")
 IPTVV_PROXY_CHECK_URL = os.getenv("IPTVV_PROXY_CHECK_URL", "https://api.ipify.org")
+IPTVV_KNOWN_BLOCKED_IP = os.getenv("IPTVV_KNOWN_BLOCKED_IP", "").strip()
 
-CREDENTIALS_EMAIL_SUBJECT = "Your trial is now active"
+# IBO Player integration configuration
+IPTVV_IBOPLAYER_ENABLED = os.getenv("IPTVV_IBOPLAYER_ENABLED", "False").lower() == "true"
+IPTVV_IBOPLAYER_COOKIE = os.getenv("IPTVV_IBOPLAYER_COOKIE", "")
+IPTVV_IBOPLAYER_PLAYLIST_URL_ID = os.getenv("IPTVV_IBOPLAYER_PLAYLIST_URL_ID", "")
+IPTVV_IBOPLAYER_PLAYLIST_NAME = os.getenv("IPTVV_IBOPLAYER_PLAYLIST_NAME", "IPTVV Canada")
+IPTVV_IBOPLAYER_PLAYLIST_URL_TEMPLATE = os.getenv("IPTVV_IBOPLAYER_PLAYLIST_URL", "http://iptvvcanada.com")
+
+# Email subject patterns to detect credentials email (checked case-insensitively)
+CREDENTIALS_EMAIL_SUBJECTS = [
+    "Free 24-Hour IPTV Trial Subscription",  # Current IPTVV format
+    "Your trial is now active",               # Legacy/alternate format
+    "IPTV Trial Subscription",                # Partial match
+]
 solver = TwoCaptcha(TWOCAPTCHA_API_KEY) if TWOCAPTCHA_API_KEY else None
 
 
 class CloudflareBlockedError(RuntimeError):
     """Raised when IPTVV serves a Cloudflare/WAF page instead of checkout."""
+
+
+class TrialRejectedError(RuntimeError):
+    """Raised when IPTVV accepts checkout but refuses to issue trial credentials."""
 
 
 # ═══════════════════════════════════════════════════════════
@@ -206,8 +224,33 @@ def wait_for_credentials_email(auth_token, max_wait_seconds=EMAIL_MAX_WAIT_SECON
 
             print(f"    - From: {from_addr}, Subject: {subject}")
 
-            # Check if this is the credentials email
-            if "iptvv" in from_addr.lower() or CREDENTIALS_EMAIL_SUBJECT.lower() in subject.lower():
+            lowered_subject = subject.lower()
+            rejection_markers = [
+                "already used",
+                "duplicate trial",
+                "trial was already used",
+                "order was cancelled",
+                "order was canceled",
+            ]
+
+            if "iptvv" in from_addr.lower() and any(marker in lowered_subject for marker in rejection_markers):
+                full_message = get_mailtm_message_by_id(auth_token, msg["id"])
+                preview = ""
+                if full_message:
+                    preview = full_message.get("text", "")[:500].strip()
+                raise TrialRejectedError(
+                    f"IPTVV refused to issue trial credentials: {subject}. "
+                    f"Message preview: {preview}"
+                )
+
+            # Check if this is the credentials email (check multiple subject patterns)
+            is_credentials_email = False
+            for pattern in CREDENTIALS_EMAIL_SUBJECTS:
+                if pattern.lower() in lowered_subject:
+                    is_credentials_email = True
+                    break
+
+            if is_credentials_email:
                 print(f"[OK] Credentials email found!")
                 # Fetch full message content
                 full_message = get_mailtm_message_by_id(auth_token, msg["id"])
@@ -230,10 +273,28 @@ def wait_for_credentials_email(auth_token, max_wait_seconds=EMAIL_MAX_WAIT_SECON
 # Selenium Browser Automation
 # ═══════════════════════════════════════════════════════════
 
+def get_random_user_agent():
+    """Generate a random realistic user agent."""
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    ]
+    return random.choice(user_agents)
+
+
 def get_driver():
-    """Initialize Chrome WebDriver with appropriate options."""
-    options = Options()
+    """Initialize Chrome WebDriver with anti-detection options (undetected-chromedriver).
+
+    Always uses a direct connection on the host's public IP; no proxy.
+    """
     headless_mode = os.getenv("HEADLESS", "True").lower() == "true"
+
+    # Use undetected-chromedriver's ChromeOptions
+    options = uc.ChromeOptions()
 
     if headless_mode:
         options.add_argument("--headless=new")
@@ -241,70 +302,71 @@ def get_driver():
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
-        # Anti-detection measures for Cloudflare and bot protection
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--disable-extensions")
-        options.add_argument("--disable-infobars")
-        options.add_argument("--disable-popup-blocking")
-        options.add_argument("--ignore-certificate-errors")
-        options.add_argument("--disable-logging")
-        options.add_argument("--log-level=3")
-        options.add_argument("--disable-notifications")
-        options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-        options.add_experimental_option("useAutomationExtension", False)
-
-        # Set realistic user agent (latest Chrome on Linux)
-        options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-
-        # Additional preferences to appear more human-like
-        prefs = {
-            "credentials_enable_service": False,
-            "profile.password_manager_enabled": False,
-            "profile.default_content_setting_values.notifications": 2,
-            "excludeSwitches": ["enable-automation"],
-            "useAutomationExtension": False
-        }
-        options.add_experimental_option("prefs", prefs)
-
         print("[*] Running in HEADLESS mode")
     else:
         options.add_argument("--start-maximized")
-        options.add_experimental_option("detach", True)
         print("[*] Running in GUI mode")
 
-    chromedriver_path = os.getenv("CHROMEDRIVER_PATH", "/usr/local/bin/chromedriver")
-    if os.path.exists(chromedriver_path):
-        print(f"[*] Using pre-installed ChromeDriver at {chromedriver_path}")
-        service = Service(chromedriver_path)
-    else:
-        print("[*] Downloading/verifying ChromeDriverManager...")
-        service = Service(ChromeDriverManager().install())
+    # Use random user agent for additional anonymity
+    random_ua = get_random_user_agent()
+    options.add_argument(f"--user-agent={random_ua}")
+    print(f"[*] Using User-Agent: {random_ua[:80]}...")
 
-    driver = webdriver.Chrome(service=service, options=options)
+    # Additional anti-detection options
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-popup-blocking")
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--disable-logging")
+    options.add_argument("--log-level=3")
+    options.add_argument("--disable-notifications")
 
-    # Execute CDP commands to mask automation
-    if headless_mode:
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": """
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5]
-                });
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en']
-                });
-                window.chrome = {
-                    runtime: {}
-                };
-                Object.defineProperty(navigator, 'permissions', {
-                    get: () => ({
-                        query: () => Promise.resolve({ state: 'granted' })
-                    })
-                });
-            """
-        })
+    # Additional preferences to appear more human-like
+    prefs = {
+        "credentials_enable_service": False,
+        "profile.password_manager_enabled": False,
+        "profile.default_content_setting_values.notifications": 2,
+        "profile.managed_default_content_settings.images": 1,  # Enable images
+    }
+
+    # Always use a direct connection (no proxy). Explicitly disable any proxy
+    # to prevent ERR_NO_SUPPORTED_PROXIES from a leaked system/env proxy setting.
+    options.add_argument("--no-proxy-server")
+    prefs["proxy"] = {
+        "mode": "direct",
+        "pac_url": "",
+        "bypass_list": ""
+    }
+    print("[*] Using direct connection (public IP, no proxy)")
+
+    options.add_experimental_option("prefs", prefs)
+
+    # Use undetected-chromedriver (no need for chromedriver path, it manages itself)
+    try:
+        print("[*] Initializing undetected-chromedriver...")
+        driver = uc.Chrome(options=options, use_subprocess=False)
+        print("[OK] undetected-chromedriver initialized successfully")
+    except Exception as e:
+        print(f"[!] Failed to initialize undetected-chromedriver: {e}")
+        print("[*] Falling back to regular ChromeDriver...")
+        # Fallback to regular webdriver if undetected fails
+        chromedriver_path = os.getenv("CHROMEDRIVER_PATH", "/usr/local/bin/chromedriver")
+        if os.path.exists(chromedriver_path):
+            service = Service(chromedriver_path)
+        else:
+            service = Service(ChromeDriverManager().install())
+
+        regular_options = Options()
+
+        # Copy all arguments from uc.ChromeOptions to regular Options
+        for arg in options.arguments:
+            regular_options.add_argument(arg)
+
+        # Copy experimental options (prefs)
+        if hasattr(options, 'experimental_options'):
+            for key, value in options.experimental_options.items():
+                regular_options.add_experimental_option(key, value)
+
+        driver = webdriver.Chrome(service=service, options=regular_options)
 
     return driver
 
@@ -378,17 +440,55 @@ def is_cloudflare_block_page(driver):
     )
 
 
+def is_browser_error_page(driver):
+    """Detect Chrome's own network-error screen (NOT a Cloudflare block).
+
+    Chrome renders these (e.g. ERR_NO_SUPPORTED_PROXIES, DNS failures, timeouts)
+    when it never reaches the site at all, so they must not be mistaken for a
+    Cloudflare/WAF block or a missing checkout form.
+    """
+    body = page_text_lower(driver)
+    current_url = (driver.current_url or "").lower()
+    markers = [
+        "this site can't be reached",
+        "this site can’t be reached",
+        "err_",
+        "dns_probe_finished",
+        "took too long to respond",
+        "your internet access is blocked",
+        "no internet",
+    ]
+    return current_url.startswith("chrome-error://") or any(marker in body for marker in markers)
+
+
 def save_page_debug_artifacts(driver, label):
     """Save a screenshot and HTML snapshot for production diagnosis."""
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "_", label).strip("_") or "page"
     debug_dir = IPTVV_DEBUG_DIR
     artifacts = {}
-    try:
-        os.makedirs(debug_dir, exist_ok=True)
-    except Exception as exc:
-        print(f"[!] Could not create debug directory {debug_dir}: {exc}")
-        debug_dir = "/tmp"
+
+    # Try to create/access the debug directory, fallback to user-writable locations
+    fallback_dirs = [debug_dir, "./logs", os.path.expanduser("~/logs"), "/tmp"]
+    debug_dir_accessible = False
+
+    for candidate_dir in fallback_dirs:
+        try:
+            os.makedirs(candidate_dir, exist_ok=True)
+            # Test write access by creating a test file
+            test_file = os.path.join(candidate_dir, f".write_test_{os.getpid()}")
+            with open(test_file, "w") as f:
+                f.write("test")
+            os.remove(test_file)
+            debug_dir = candidate_dir
+            debug_dir_accessible = True
+            if candidate_dir != IPTVV_DEBUG_DIR:
+                print(f"[*] Using fallback debug directory: {debug_dir}")
+            break
+        except Exception as exc:
+            if candidate_dir == fallback_dirs[-1]:
+                print(f"[!] Could not access any debug directory, last error: {exc}")
+            continue
 
     base_path = os.path.join(debug_dir, f"iptvv_{safe_label}_{timestamp}")
 
@@ -496,13 +596,20 @@ def preflight_checkout_access():
         driver = get_driver()
         browser_ip = get_browser_public_ip(driver)
         print(f"[*] Browser-visible public IP: {browser_ip}")
+        if IPTVV_KNOWN_BLOCKED_IP and browser_ip == IPTVV_KNOWN_BLOCKED_IP:
+            print(f"[!] Browser is still using known blocked IPTVV IP: {IPTVV_KNOWN_BLOCKED_IP}")
         if server_ip != "unknown" and browser_ip != "unknown" and server_ip == browser_ip:
             print("[*] Browser IP matches server IP; this is expected for full-system VPN egress.")
+
+        print("[*] Seeding free-trial cart for checkout preflight...")
+        driver.get(f"{IPTVV_BASE_URL}/?add-to-cart=7758")
+        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        time.sleep(5)
 
         print(f"[*] Opening checkout: {checkout_url}")
         driver.get(checkout_url)
         WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        time.sleep(3)
+        time.sleep(5)
 
         artifacts = save_page_debug_artifacts(driver, "preflight_checkout")
         print(f"[*] Checkout URL after load: {driver.current_url}")
@@ -520,12 +627,25 @@ def preflight_checkout_access():
                 f"screenshot: {artifacts.get('screenshot', 'not saved')}."
             )
 
+        if is_browser_error_page(driver):
+            print("[!] Chrome rendered a network-error page (NOT a Cloudflare block)")
+            raise RuntimeError(
+                "Preflight failed: network/connectivity error - Chrome never reached IPTVV "
+                "(this is NOT a Cloudflare IP block; check DNS/egress/leftover proxy settings). "
+                f"Server IP: {server_ip}; browser IP: {browser_ip}; "
+                f"Current URL: {driver.current_url}; title: {driver.title}; "
+                f"debug HTML: {artifacts.get('html', 'not saved')}; "
+                f"screenshot: {artifacts.get('screenshot', 'not saved')}."
+            )
+
         try:
             driver.find_element(By.ID, "billing_email")
         except Exception:
             raise RuntimeError(
-                "Preflight failed: Cloudflare block was not detected, but billing_email is missing. "
+                "Preflight failed: no Cloudflare block and no network error detected, "
+                "but the checkout billing_email field is missing (unexpected page layout). "
                 f"Server IP: {server_ip}; browser IP: {browser_ip}; "
+                f"Current URL: {driver.current_url}; title: {driver.title}; "
                 f"debug HTML: {artifacts.get('html', 'not saved')}; "
                 f"screenshot: {artifacts.get('screenshot', 'not saved')}."
             )
@@ -1202,6 +1322,112 @@ def extract_credentials_from_email(message):
     return username, password, hostname
 
 
+def save_to_iboplayer(username, password, hostname, max_retries=3):
+    """
+    Save IPTVV playlist to IBO Player using their API.
+
+    Args:
+        username: IPTVV username
+        password: IPTVV password
+        hostname: IPTVV server hostname/URL
+        max_retries: Maximum number of retry attempts (default: 3)
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not IPTVV_IBOPLAYER_ENABLED:
+        print("[*] IBO Player integration is disabled (IPTVV_IBOPLAYER_ENABLED=False)")
+        return False
+
+    if not IPTVV_IBOPLAYER_COOKIE or not IPTVV_IBOPLAYER_PLAYLIST_URL_ID:
+        print("[!] IBO Player integration enabled but missing required credentials:")
+        print(f"    - IPTVV_IBOPLAYER_COOKIE: {'Set' if IPTVV_IBOPLAYER_COOKIE else 'Missing'}")
+        print(f"    - IPTVV_IBOPLAYER_PLAYLIST_URL_ID: {'Set' if IPTVV_IBOPLAYER_PLAYLIST_URL_ID else 'Missing'}")
+        return False
+
+    api_url = "https://iboplayer.com/frontend/device/savePlaylist"
+
+    headers = {
+        "Content-Type": "application/json",
+        "Cookie": IPTVV_IBOPLAYER_COOKIE,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    }
+
+    # Construct the playlist URL using the hostname from credentials
+    playlist_url = hostname.rstrip("/")
+
+    payload = {
+        "current_playlist_url_id": IPTVV_IBOPLAYER_PLAYLIST_URL_ID,
+        "password": password,
+        "pin": "",
+        "playlist_name": IPTVV_IBOPLAYER_PLAYLIST_NAME,
+        "playlist_type": "xc",  # Xtream Codes format
+        "playlist_url": playlist_url,
+        "protect": "false",
+        "username": username,
+        "xml_url": ""
+    }
+
+    print("\n" + "=" * 60)
+    print("[*] Saving playlist to IBO Player...")
+    print("=" * 60)
+    print(f"[*] API URL: {api_url}")
+    print(f"[*] Playlist Name: {IPTVV_IBOPLAYER_PLAYLIST_NAME}")
+    print(f"[*] Playlist URL: {playlist_url}")
+    print(f"[*] Username: {username}")
+    print(f"[*] Password: {password}")
+    print("=" * 60)
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post(
+                api_url,
+                json=payload,
+                headers=headers,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                print(f"[OK] Playlist saved to IBO Player successfully!")
+                try:
+                    response_data = response.json()
+                    print(f"[*] IBO Player response: {response_data}")
+                except:
+                    pass
+                return True
+
+            elif 400 <= response.status_code < 500:
+                # Client error - don't retry, configuration issue
+                print(f"[!] IBO Player API error {response.status_code}: {response.text[:200]}")
+                print(f"[!] This is a configuration error - please check your IBO Player credentials")
+                return False
+
+            else:
+                # Server error - retry with exponential backoff
+                print(f"[!] IBO Player API error {response.status_code} (attempt {attempt}/{max_retries})")
+                if attempt < max_retries:
+                    wait_time = 2 ** attempt  # Exponential backoff: 2s, 4s, 8s
+                    print(f"[*] Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+
+        except requests.exceptions.Timeout:
+            print(f"[!] IBO Player API timeout (attempt {attempt}/{max_retries})")
+            if attempt < max_retries:
+                wait_time = 2 ** attempt
+                print(f"[*] Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+
+        except Exception as e:
+            print(f"[!] IBO Player API exception (attempt {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
+                wait_time = 2 ** attempt
+                print(f"[*] Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+
+    print(f"[!] Failed to save playlist to IBO Player after {max_retries} attempts")
+    return False
+
+
 # ═══════════════════════════════════════════════════════════
 # Webhook & Notification Integration
 # ═══════════════════════════════════════════════════════════
@@ -1279,6 +1505,9 @@ def main(user_id=None, callback_url=None):
     print("=" * 60 + "\n")
 
     try:
+        print("\n[*] Creating trial using public IP (direct connection)")
+        print("=" * 60)
+
         # Step 1: Initialize browser and confirm IPTVV checkout is reachable.
         driver = get_driver()
 
@@ -1319,13 +1548,16 @@ def main(user_id=None, callback_url=None):
 
         # Success!
         print("\n" + "=" * 60)
-        print("✓ IPTVV CANADA CREDENTIALS EXTRACTED SUCCESSFULLY")
+        print("\u2713 IPTVV CANADA CREDENTIALS EXTRACTED SUCCESSFULLY")
         print("=" * 60)
         print(f"[*] Server Address: {hostname}")
         print(f"[*] Username: {username}")
         print(f"[*] Password: {password}")
         print(f"[*] M3U URL: {m3u_url}")
         print("=" * 60 + "\n")
+
+        # Save to IBO Player if enabled
+        save_to_iboplayer(username, password, hostname)
 
         # Send success notifications
         if is_laravel_mode:
@@ -1347,11 +1579,39 @@ def main(user_id=None, callback_url=None):
 
         print("[OK] IPTVV Canada automation complete")
 
+    except (CloudflareBlockedError, TrialRejectedError) as exc:
+        # No proxy fallback configured - report on the public IP result and exit.
+        print(f"\n[!] IPTVV Canada automation failed: {exc}")
+
+        if driver:
+            try:
+                driver.quit()
+                driver = None
+            except:
+                pass
+
+        if is_laravel_mode:
+            send_webhook_callback(
+                callback_url=callback_url,
+                user_id=user_id,
+                status="failed",
+                error=str(exc)
+            )
+        send_telegram_notification("error", type(exc).__name__, str(exc))
+        raise SystemExit(1)
+
     except Exception as exc:
         import traceback
         error_traceback = traceback.format_exc()
         print(f"\n[!] IPTVV Canada automation failed: {exc}")
         print(error_traceback)
+
+        if driver:
+            try:
+                driver.quit()
+                driver = None
+            except:
+                pass
 
         if is_laravel_mode:
             send_webhook_callback(
@@ -1362,12 +1622,6 @@ def main(user_id=None, callback_url=None):
             )
 
         send_telegram_notification("error", str(exc), error_traceback)
-
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
         raise SystemExit(1)
 
     finally:

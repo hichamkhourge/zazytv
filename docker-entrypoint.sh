@@ -46,6 +46,8 @@ echo "Cron Schedule:"
 crontab -l
 echo ""
 
+# Automation runs on the host's public IP with a direct connection (no proxy).
+
 # Start Xvfb virtual display for headless Chrome automation
 echo "[*] Starting Xvfb virtual display..."
 Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &

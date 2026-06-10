@@ -45,6 +45,7 @@ CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
 # IPTVV diagnostics / egress preflight
 IPTVV_DEBUG_DIR=/app/logs
 IPTVV_PROXY_CHECK_URL=https://api.ipify.org
+IPTVV_KNOWN_BLOCKED_IP=38.242.210.18
 IPTVV_CLOUDFLARE_WAIT_SECONDS=45
 IPTVV_PAGE_LOAD_RETRIES=2
 
@@ -56,6 +57,16 @@ TELEGRAM_ENABLED=True
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
 ```
+
+## Network / Connection
+
+The automation runs on the host's **public IP using a direct connection**. There is
+no proxy support — all proxy/IP-rotation fallbacks (Tor, Webshare, BrightData) have
+been removed.
+
+IPTVV.ca sits behind Cloudflare, so if the host IP is blocked the run will fail with a
+Cloudflare/WAF error rather than rotating to another IP. If you hit a block, change the
+host's egress (e.g. run from a different server or VPN at the OS level) and retry.
 
 ## Usage
 

@@ -56,8 +56,10 @@ services:
       # IPTVV Canada diagnostics / egress preflight
       - IPTVV_DEBUG_DIR=${IPTVV_DEBUG_DIR:-/app/logs}
       - IPTVV_PROXY_CHECK_URL=${IPTVV_PROXY_CHECK_URL:-https://api.ipify.org}
+      - IPTVV_KNOWN_BLOCKED_IP=${IPTVV_KNOWN_BLOCKED_IP:-}
       - IPTVV_CLOUDFLARE_WAIT_SECONDS=${IPTVV_CLOUDFLARE_WAIT_SECONDS:-45}
       - IPTVV_PAGE_LOAD_RETRIES=${IPTVV_PAGE_LOAD_RETRIES:-2}
+      # Automation runs on the host's public IP with a direct connection (no proxy).
 
     volumes:
       # Persistent storage for playlists
