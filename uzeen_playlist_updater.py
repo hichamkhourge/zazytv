@@ -23,6 +23,13 @@ from datetime import datetime
 from dotenv import load_dotenv
 from urllib.parse import urlparse, urljoin
 
+try:
+    from telegram_notifier import send_notification
+except Exception:
+    # Telegram notifier is optional; degrade gracefully if unavailable.
+    def send_notification(status, message, details=None):
+        return False
+
 # Load environment variables
 load_dotenv()
 
@@ -570,6 +577,19 @@ def main():
 
     # Update iboplayer playlist
     if update_iboplayer_playlist(credentials):
+        # Notify Telegram that the playlist was updated successfully
+        details = (
+            f"Host: {credentials['host']}\n"
+            f"Username: {credentials['username']}\n"
+            f"Password: {credentials['password']}\n"
+            f"Changed: {', '.join(changed_fields)}"
+        )
+        send_notification(
+            "✅ SUCCESS",
+            "Uzeen playlist updated on IboPlayer with new Xtream credentials.",
+            details,
+        )
+
         # Save new state
         if save_state(credentials):
             print("\n[✓] Playlist updated and state saved successfully!")
