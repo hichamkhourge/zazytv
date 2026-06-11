@@ -15,6 +15,8 @@ import sys
 import traceback
 import argparse
 import threading
+import tempfile
+import shutil
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -33,6 +35,7 @@ parser.add_argument('--user-id', type=int, help='IPTV account ID')
 parser.add_argument('--username', type=str, help='Ugeen master account username (overrides env)')
 parser.add_argument('--password', type=str, help='Ugeen master account password (overrides env)')
 parser.add_argument('--callback-url', type=str, help='Webhook URL to send progress/results')
+parser.add_argument('--test-proxy', action='store_true', help='Only test the Webshare proxy: open the IP-check URL, print the public IP, and exit')
 args, unknown = parser.parse_known_args()
 
 # Configuration from environment variables (with CLI override)
@@ -51,6 +54,14 @@ WEBHOOK_AUTH_TOKEN = os.getenv('WEBHOOK_AUTH_TOKEN', '')
 UGEEN_HEADLESS = os.getenv('UGEEN_HEADLESS', 'True').lower() == 'true'
 UGEEN_SESSION_DIR = os.getenv('UGEEN_SESSION_DIR', './ugeen_sessions')
 UGEEN_DATA_DIR = os.getenv('UGEEN_DATA_DIR', './ugeen_data')
+
+# Webshare proxy settings (authenticated rotating proxy to change the outgoing IP)
+USE_WEBSHARE_PROXY = os.getenv('USE_WEBSHARE_PROXY', 'False').lower() == 'true'
+WEBSHARE_PROXY_USER = os.getenv('WEBSHARE_PROXY_USER', '')
+WEBSHARE_PROXY_PASS = os.getenv('WEBSHARE_PROXY_PASS', '')
+WEBSHARE_PROXY_HOST = os.getenv('WEBSHARE_PROXY_HOST', 'p.webshare.io')
+WEBSHARE_PROXY_PORT = os.getenv('WEBSHARE_PROXY_PORT', '80')
+PROXY_CHECK_URL = os.getenv('IPTVV_PROXY_CHECK_URL', 'https://api.ipify.org')
 
 # Submit button configuration (for production reliability)
 CAPTCHA_POST_SOLVE_WAIT = int(os.getenv('CAPTCHA_POST_SOLVE_WAIT', '3'))  # Seconds to wait after solving CAPTCHA (reduced to prevent token expiry)
@@ -1141,8 +1152,96 @@ def perform_api_login(email, password, recaptcha_solution, api_base):
         traceback.print_exc()
         return None
 
+def create_proxy_auth_extension(host, port, user, password):
+    """Build an unpacked Chrome extension that points Chrome at an authenticated
+    proxy and answers the proxy Basic-auth challenge automatically.
+
+    Chrome's --proxy-server flag cannot carry user:pass credentials, so for an
+    authenticated proxy (e.g. Webshare) we inject them via chrome.webRequest
+    .onAuthRequired. Returns the path to a temp directory holding the unpacked
+    extension (caller is responsible for cleanup)."""
+    ext_dir = tempfile.mkdtemp(prefix='ugeen_proxy_ext_')
+
+    manifest = {
+        "version": "1.0.0",
+        "manifest_version": 2,
+        "name": "Proxy Auth",
+        "permissions": [
+            "proxy",
+            "tabs",
+            "unlimitedStorage",
+            "storage",
+            "<all_urls>",
+            "webRequest",
+            "webRequestBlocking",
+        ],
+        "background": {"scripts": ["background.js"]},
+        "minimum_chrome_version": "22.0.0",
+    }
+
+    background_js = """
+var config = {
+    mode: "fixed_servers",
+    rules: {
+        singleProxy: {
+            scheme: "http",
+            host: "%s",
+            port: parseInt("%s")
+        },
+        bypassList: ["localhost"]
+    }
+};
+chrome.proxy.settings.set({value: config, scope: "regular"}, function() {});
+function callbackFn(details) {
+    return {
+        authCredentials: {
+            username: "%s",
+            password: "%s"
+        }
+    };
+}
+chrome.webRequest.onAuthRequired.addListener(
+    callbackFn,
+    {urls: ["<all_urls>"]},
+    ["blocking"]
+);
+""" % (host, port, user, password)
+
+    with open(os.path.join(ext_dir, 'manifest.json'), 'w') as f:
+        json.dump(manifest, f)
+    with open(os.path.join(ext_dir, 'background.js'), 'w') as f:
+        f.write(background_js)
+
+    return ext_dir
+
+
+def get_public_ip(driver, url=None):
+    """Open the IP-check URL in the browser and return the public IP string it shows.
+
+    Used to confirm the proxy is actually changing the outgoing IP. Returns None
+    on failure."""
+    check_url = url or PROXY_CHECK_URL
+    try:
+        driver.get(check_url)
+        time.sleep(2)
+        ip_text = driver.execute_script("return document.body ? document.body.innerText.trim() : '';")
+        if ip_text:
+            # api.ipify.org returns the bare IP; keep it short for safety
+            return ip_text.splitlines()[0].strip()[:64]
+    except Exception as e:
+        print(f"⚠️ Could not read public IP from {check_url}: {e}")
+    return None
+
+
 def create_stealth_driver(proxy=None, headless=None):
-    """Create undetected Chrome driver with stealth options"""
+    """Create undetected Chrome driver with stealth options.
+
+    `proxy` may be:
+      - None: direct connection
+      - a string like 'http://host:port': unauthenticated proxy via --proxy-server
+      - a dict {'host','port','user','password'}: authenticated proxy via a
+        generated proxy-auth extension (e.g. Webshare)
+    """
     # Use global setting if not specified
     if headless is None:
         headless = UGEEN_HEADLESS
@@ -1210,7 +1309,17 @@ def create_stealth_driver(proxy=None, headless=None):
             options.add_argument('--headless=new')
             print("Running in headless mode (no virtual display detected)")
 
-    if proxy:
+    proxy_ext_dir = None
+    if isinstance(proxy, dict) and proxy.get('host'):
+        # Authenticated proxy (e.g. Webshare) -> use an extension to inject creds
+        proxy_ext_dir = create_proxy_auth_extension(
+            proxy['host'], proxy['port'],
+            proxy.get('user', ''), proxy.get('password', '')
+        )
+        options.add_argument(f'--load-extension={proxy_ext_dir}')
+        print(f"Using authenticated proxy via extension: {proxy['host']}:{proxy['port']} (user={proxy.get('user', '')})")
+    elif proxy:
+        # Plain proxy string, no auth
         options.add_argument(f'--proxy-server={proxy}')
         print(f"Using proxy: {proxy}")
 
@@ -1238,7 +1347,13 @@ def create_stealth_driver(proxy=None, headless=None):
         options_minimal = uc.ChromeOptions()
         options_minimal.add_argument('--no-sandbox')
         options_minimal.add_argument('--disable-dev-shm-usage')
+        if proxy_ext_dir:
+            # Keep the proxy working even on the fallback path
+            options_minimal.add_argument(f'--load-extension={proxy_ext_dir}')
         driver = uc.Chrome(options=options_minimal, use_subprocess=False)
+
+    # Remember the proxy extension dir so it can be cleaned up after quit
+    driver._proxy_ext_dir = proxy_ext_dir
 
     # Set user agent via CDP
     try:
@@ -1251,6 +1366,32 @@ def create_stealth_driver(proxy=None, headless=None):
 
     print(f"✓ Stealth browser created")
     return driver
+
+
+def cleanup_driver(driver):
+    """Quit the driver and remove any temp proxy-auth extension it created."""
+    ext_dir = getattr(driver, '_proxy_ext_dir', None)
+    try:
+        driver.quit()
+    except Exception:
+        pass
+    if ext_dir:
+        shutil.rmtree(ext_dir, ignore_errors=True)
+
+
+def build_webshare_proxy():
+    """Build the Webshare authenticated-proxy spec from env, or None if disabled/unset."""
+    if not USE_WEBSHARE_PROXY:
+        return None
+    if not WEBSHARE_PROXY_HOST or not WEBSHARE_PROXY_PORT:
+        print("⚠️ USE_WEBSHARE_PROXY is True but WEBSHARE_PROXY_HOST/PORT are not set")
+        return None
+    return {
+        'host': WEBSHARE_PROXY_HOST,
+        'port': str(WEBSHARE_PROXY_PORT),
+        'user': WEBSHARE_PROXY_USER,
+        'password': WEBSHARE_PROXY_PASS,
+    }
 
 def perform_login_with_retries(driver, wait, config, retry_count=0):
     """Perform login with human-like behavior and retry logic"""
@@ -1457,6 +1598,11 @@ def scrape_with_api_auth(proxy=None):
             driver = create_stealth_driver(proxy=proxy)
             wait = WebDriverWait(driver, 20)
 
+            # Preflight: confirm the outgoing IP (proves the proxy is active)
+            if proxy:
+                ip = get_public_ip(driver)
+                print(f"🌐 Public IP via browser: {ip if ip else 'unknown'}")
+
             # Perform login with retries
             login_result = perform_login_with_retries(driver, wait, config)
 
@@ -1471,7 +1617,7 @@ def scrape_with_api_auth(proxy=None):
             save_session(cookies, jwt_token, UGEEN_EMAIL)
 
             # Clean up browser
-            driver.quit()
+            cleanup_driver(driver)
             print('✓ Browser closed')
 
         except Exception as e:
@@ -1479,7 +1625,7 @@ def scrape_with_api_auth(proxy=None):
             import traceback
             traceback.print_exc()
             if driver:
-                driver.quit()
+                cleanup_driver(driver)
             return False
 
     # Check if renewal is available before proceeding
@@ -1944,8 +2090,55 @@ def scrape_with_api_auth(proxy=None):
             driver.quit()
         return False
 
+def run_proxy_test():
+    """Standalone Webshare proxy check: open the IP-check URL, print the IP, exit.
+
+    Lets you confirm the outgoing IP changed without running the full login flow."""
+    print('\n' + '='*60)
+    print('🌐 Webshare Proxy Test')
+    print('='*60 + '\n')
+
+    # For the test we use the Webshare vars directly, ignoring USE_WEBSHARE_PROXY,
+    # so you can verify the proxy without toggling the env flag first.
+    if not WEBSHARE_PROXY_HOST or not WEBSHARE_PROXY_PORT:
+        print("✗ WEBSHARE_PROXY_HOST/PORT are not set. Configure WEBSHARE_PROXY_* in your environment.")
+        return False
+    proxy = {
+        'host': WEBSHARE_PROXY_HOST,
+        'port': str(WEBSHARE_PROXY_PORT),
+        'user': WEBSHARE_PROXY_USER,
+        'password': WEBSHARE_PROXY_PASS,
+    }
+
+    print(f"Proxy: {proxy['host']}:{proxy['port']} (user={proxy['user']})")
+    driver = None
+    try:
+        driver = create_stealth_driver(proxy=proxy)
+        ip = get_public_ip(driver)
+        if ip:
+            print(f"\n✓ Public IP via Webshare proxy: {ip}")
+            print("  Compare with your server's direct IP (e.g. `curl https://api.ipify.org`).")
+            return True
+        print("\n✗ Could not determine the public IP through the proxy.")
+        print("  Check the WEBSHARE_PROXY_PORT (Webshare rotating endpoint is often :80).")
+        return False
+    except Exception as e:
+        print(f"\n✗ Proxy test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    finally:
+        if driver:
+            cleanup_driver(driver)
+
+
 def main():
     """Main entry point with proxy support and proper exit codes"""
+    # Standalone proxy test mode short-circuits the full automation
+    if args.test_proxy:
+        ok = run_proxy_test()
+        sys.exit(0 if ok else 1)
+
     # Start progress reporter thread if webhook callback is configured
     progress_thread = None
     stop_event = None
@@ -1965,10 +2158,12 @@ def main():
             )
             progress_thread.start()
 
-        # Optional: Add your proxy here if you have one
-        # Format: 'http://username:password@proxy_host:proxy_port'
-        # or: 'http://proxy_host:proxy_port'
-        proxy = None
+        # Build proxy spec from Webshare env (None if USE_WEBSHARE_PROXY is False)
+        proxy = build_webshare_proxy()
+        if proxy:
+            log_message(f"Webshare proxy enabled: {proxy['host']}:{proxy['port']}", "INFO")
+        else:
+            log_message("No proxy configured (direct connection)", "INFO")
 
         success = scrape_with_api_auth(proxy=proxy)
 
