@@ -1283,12 +1283,12 @@ def perform_login_with_retries(driver, wait, config, retry_count=0):
         random_delay(1, 2)  # Longer pause before starting to type
 
         # Type like human
-        print('Entering email...')
+        print(f"Entering email: {config['username']}")
         type_like_human(username_field, config['username'])
         random_delay(1, 2)  # Longer pause between fields
 
         # Fill password field
-        print('Entering password...')
+        print(f"Entering password: {config['password']}")
         password_field = driver.find_element(By.CSS_SELECTOR, '#password')
         type_like_human(password_field, config['password'], min_delay=0.08, max_delay=0.25)
         random_delay(1.5, 3)  # Even longer pause before clicking
@@ -1430,6 +1430,8 @@ def scrape_with_api_auth(proxy=None):
     print('\n' + '='*60)
     print('🚀 UGEEN API Scraper with Anti-Detection (Enhanced)')
     print('='*60 + '\n')
+
+    print(f"Using UGEEN credentials -> email: {UGEEN_EMAIL} | password: {UGEEN_PASSWORD}")
 
     # Try to load existing session first
     print('=== STEP 0: Checking for existing session ===')
