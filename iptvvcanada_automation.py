@@ -1,20 +1,28 @@
 """
 IPTVV Canada - Automated Trial Account Creation
 
-Automates the IPTVV.ca cart checkout flow using temporary mail.tm emails
-and extracts Xtream credentials from the received email.
+Automates the IPTVV.ca cart checkout flow and extracts Xtream credentials from the
+received email. By default it uses a real Gmail account read over IMAP with plus-aliasing
+(IPTVV_GMAIL_* env vars); set IPTVV_EMAIL_BACKEND=tempmaillol or =mailtm for the
+temp-mail backends.
 
 Install deps: pip install selenium webdriver-manager 2captcha-python python-dotenv requests
 """
 import argparse
+import email as email_lib
+import email.header
+import email.utils
 import html
+import imaplib
 import json
 import os
 import random
 import re
 import string
+import tempfile
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 import requests
 from dotenv import load_dotenv
 import undetected_chromedriver as uc
@@ -45,14 +53,52 @@ TWOCAPTCHA_API_KEY = os.getenv("TWOCAPTCHA_API_KEY")
 IPTVV_BASE_URL = os.getenv("IPTVV_BASE_URL", "https://iptvv.ca").rstrip("/")
 IPTVV_CART_URL = os.getenv("IPTVV_CART_URL", f"{IPTVV_BASE_URL}/cart/")
 MAILTM_API_BASE = os.getenv("MAILTM_API_BASE", "https://api.mail.tm")
+
+# Email backend:
+#   "gmail"      (default) — a real Gmail account read over IMAP, using plus-aliasing
+#                (<base>+<random>@gmail.com) so every run gets a fresh, fully deliverable
+#                address that passes IPTVV's checkout email validation.
+#   "tempmaillol"          — free tempmail.lol API (rotating obscure domains).
+#   "mailtm"               — legacy mail.tm API (now blocked by IPTVV).
+IPTVV_EMAIL_BACKEND = os.getenv("IPTVV_EMAIL_BACKEND", "gmail").strip().lower()
+
+# Gmail IMAP backend. Log in to the base mailbox over IMAP with a Google App Password
+# (requires 2-Step Verification on the account).
+IPTVV_GMAIL_ADDRESS = os.getenv("IPTVV_GMAIL_ADDRESS", "").strip()
+IPTVV_GMAIL_APP_PASSWORD = os.getenv("IPTVV_GMAIL_APP_PASSWORD", "").replace(" ", "")
+IPTVV_GMAIL_IMAP_HOST = os.getenv("IPTVV_GMAIL_IMAP_HOST", "imap.gmail.com").strip()
+IPTVV_GMAIL_IMAP_PORT = int(os.getenv("IPTVV_GMAIL_IMAP_PORT", "993"))
+# Receiving address scheme:
+#   - If IPTVV_EMAIL_DOMAIN is set (a domain you own with a catch-all forwarding into the
+#     Gmail base mailbox), each run gets a distinct real address random@that-domain. This
+#     is the reliable choice: IPTVV cannot normalize/dedupe distinct local parts the way
+#     it strips Gmail "+tags", and your own domain is not on any disposable blocklist.
+#   - If unset, it falls back to a Gmail plus-alias <base>+<random>@gmail.com (note: IPTVV
+#     normalizes these to the base account, so they only yield one trial per base account).
+IPTVV_EMAIL_DOMAIN = os.getenv("IPTVV_EMAIL_DOMAIN", "").strip().lstrip("@")
+
+# tempmail.lol API. No key is required for the free tier; set TEMPMAILLOL_API_KEY for
+# higher rate limits, and TEMPMAILLOL_DOMAIN to pin a specific domain (via v2 create).
+TEMPMAILLOL_API_BASE = os.getenv("TEMPMAILLOL_API_BASE", "https://api.tempmail.lol").rstrip("/")
+TEMPMAILLOL_API_KEY = os.getenv("TEMPMAILLOL_API_KEY", "").strip()
+TEMPMAILLOL_DOMAIN = os.getenv("TEMPMAILLOL_DOMAIN", "").strip().lstrip("@")
+
 EMAIL_POLL_SECONDS = int(os.getenv("IPTVV_EMAIL_POLL_SECONDS", "30"))
 EMAIL_MAX_WAIT_SECONDS = int(os.getenv("IPTVV_EMAIL_MAX_WAIT_SECONDS", "2700"))  # 45 minutes
+# Socket timeout for IMAP calls so a stalled connection can't hang the whole run.
+IPTVV_IMAP_TIMEOUT = int(os.getenv("IPTVV_IMAP_TIMEOUT", "30"))
 AUTO_EXIT = os.getenv("AUTO_EXIT", "True").lower() == "true"
 IPTVV_PAGE_LOAD_RETRIES = int(os.getenv("IPTVV_PAGE_LOAD_RETRIES", "2"))
 IPTVV_CLOUDFLARE_WAIT_SECONDS = int(os.getenv("IPTVV_CLOUDFLARE_WAIT_SECONDS", "45"))
 IPTVV_DEBUG_DIR = os.getenv("IPTVV_DEBUG_DIR", "/app/logs")
 IPTVV_PROXY_CHECK_URL = os.getenv("IPTVV_PROXY_CHECK_URL", "https://api.ipify.org")
 IPTVV_KNOWN_BLOCKED_IP = os.getenv("IPTVV_KNOWN_BLOCKED_IP", "").strip()
+
+# Optional authenticated proxy for the checkout browser (e.g. Apify residential).
+# Disabled by default; when enabled, only the browser egress is proxied -- the
+# requests-based calls (mail.tm, 2captcha, IBO Player, webhooks) stay direct.
+USE_IPTVV_PROXY = os.getenv("USE_IPTVV_PROXY", "False").lower() == "true"
+IPTVV_PROXY_URL = os.getenv("IPTVV_PROXY_URL", "").strip()
 
 # IBO Player integration configuration
 IPTVV_IBOPLAYER_ENABLED = os.getenv("IPTVV_IBOPLAYER_ENABLED", "False").lower() == "true"
@@ -195,17 +241,377 @@ def get_mailtm_message_by_id(auth_token, message_id):
         return None
 
 
-def wait_for_credentials_email(auth_token, max_wait_seconds=EMAIL_MAX_WAIT_SECONDS):
-    """
-    Poll mail.tm inbox until credentials email arrives.
+def _scan_messages_for_credentials(messages, fetch_full):
+    """Scan a list of normalized messages for the IPTVV credentials/rejection email.
 
-    Args:
-        auth_token: Bearer token for authentication
-        max_wait_seconds: Maximum time to wait (default: 2700 seconds / 45 minutes)
+    Each message is a dict with at least 'subject', 'from': {'address': ...} and 'id'.
+    `fetch_full(msg)` returns the full message body (with 'text'/'html'); for tempmail.lol
+    the message is already complete so it returns msg unchanged, while for mail.tm it
+    fetches the body by id.
+
+    Returns the full credentials message, or None if not found in this batch.
+    Raises TrialRejectedError if a rejection email is seen.
+    """
+    rejection_markers = [
+        "already used",
+        "duplicate trial",
+        "trial was already used",
+        "order was cancelled",
+        "order was canceled",
+    ]
+
+    for msg in messages:
+        subject = msg.get("subject", "")
+        from_addr = msg.get("from", {}).get("address", "")
+
+        print(f"    - From: {from_addr}, Subject: {subject}")
+
+        lowered_subject = subject.lower()
+
+        if "iptvv" in from_addr.lower() and any(marker in lowered_subject for marker in rejection_markers):
+            full_message = fetch_full(msg)
+            preview = ""
+            if full_message:
+                preview = full_message.get("text", "")[:500].strip()
+            raise TrialRejectedError(
+                f"IPTVV refused to issue trial credentials: {subject}. "
+                f"Message preview: {preview}"
+            )
+
+        # Check if this is the credentials email (check multiple subject patterns)
+        for pattern in CREDENTIALS_EMAIL_SUBJECTS:
+            if pattern.lower() in lowered_subject:
+                print("[OK] Credentials email found!")
+                full_message = fetch_full(msg)
+                if full_message:
+                    return full_message
+                break
+
+    return None
+
+
+# ═══════════════════════════════════════════════════════════
+# Gmail IMAP Backend (plus-aliasing)
+# ═══════════════════════════════════════════════════════════
+
+def _redact(value, keep=2):
+    """Mask a secret for logging: keep the first/last `keep` chars, star the rest."""
+    if not value:
+        return "(empty)"
+    s = str(value)
+    if len(s) <= keep * 2:
+        return "*" * len(s)
+    return f"{s[:keep]}{'*' * (len(s) - keep * 2)}{s[-keep:]}"
+
+
+def build_gmail_alias():
+    """Build a fresh receiving address read via the Gmail base mailbox.
+
+    With IPTVV_EMAIL_DOMAIN set (a catch-all domain forwarding into the Gmail mailbox),
+    returns a distinct real address random@that-domain. Otherwise falls back to a Gmail
+    plus-alias <base>+<random>@gmail.com.
+    """
+    # Letters only (no digits): IPTVV's checkout validator rejects plus-tags
+    # that contain numbers, so keep the local part alphabetic.
+    suffix = "".join(random.choices(string.ascii_lowercase, k=12))
+    if IPTVV_EMAIL_DOMAIN:
+        # A leading letter keeps the local part looking like a normal username.
+        return f"u{suffix}@{IPTVV_EMAIL_DOMAIN}"
+    local, _, domain = IPTVV_GMAIL_ADDRESS.partition("@")
+    return f"{local}+{suffix}@{domain}"
+
+
+def _gmail_connect():
+    """Open an authenticated IMAP connection to the Gmail base inbox."""
+    conn = imaplib.IMAP4_SSL(IPTVV_GMAIL_IMAP_HOST, IPTVV_GMAIL_IMAP_PORT, timeout=IPTVV_IMAP_TIMEOUT)
+    conn.login(IPTVV_GMAIL_ADDRESS, IPTVV_GMAIL_APP_PASSWORD)
+    conn.select("INBOX")
+    return conn
+
+
+def _gmail_search_uids_for_alias(conn, alias):
+    """Return the set of message UIDs delivered to `alias`.
+
+    Gmail records the exact plus-alias in the Delivered-To header and supports the
+    native X-GM-RAW search, which is the most reliable; standard HEADER/TO searches are
+    tried as fallbacks. The alias is freshly random per run, so any match belongs to us.
+    """
+    uids = set()
+    # Gmail-native search first (handles plus-aliasing reliably).
+    try:
+        typ, data = conn.uid("search", None, "X-GM-RAW", f'"deliveredto:{alias}"')
+        if typ == "OK" and data and data[0]:
+            uids.update(data[0].split())
+    except Exception:
+        pass
+
+    for criterion in (
+        f'(HEADER DELIVERED-TO "{alias}")',
+        f'(HEADER TO "{alias}")',
+        f'(TO "{alias}")',
+    ):
+        try:
+            typ, data = conn.uid("search", None, criterion)
+            if typ == "OK" and data and data[0]:
+                uids.update(data[0].split())
+        except Exception:
+            continue
+    return uids
+
+
+def _parse_imap_message(raw_bytes, uid):
+    """Parse a raw RFC822 message into the normalized shape used by the scanner."""
+    msg = email_lib.message_from_bytes(raw_bytes)
+
+    try:
+        subject = str(email_lib.header.make_header(email_lib.header.decode_header(msg.get("Subject", ""))))
+    except Exception:
+        subject = msg.get("Subject", "") or ""
+
+    from_addr = email_lib.utils.parseaddr(msg.get("From", ""))[1]
+
+    text_parts = []
+    html_parts = []
+
+    def _decode(part):
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            return None
+        charset = part.get_content_charset() or "utf-8"
+        try:
+            return payload.decode(charset, errors="replace")
+        except (LookupError, TypeError):
+            return payload.decode("utf-8", errors="replace")
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.is_multipart():
+                continue
+            disposition = str(part.get("Content-Disposition") or "")
+            if "attachment" in disposition.lower():
+                continue
+            decoded = _decode(part)
+            if decoded is None:
+                continue
+            ctype = part.get_content_type()
+            if ctype == "text/html":
+                html_parts.append(decoded)
+            elif ctype == "text/plain":
+                text_parts.append(decoded)
+    else:
+        decoded = _decode(msg)
+        if decoded is not None:
+            if msg.get_content_type() == "text/html":
+                html_parts.append(decoded)
+            else:
+                text_parts.append(decoded)
+
+    uid_str = uid.decode() if isinstance(uid, bytes) else str(uid)
+    return {
+        "id": uid_str,
+        "subject": subject,
+        "from": {"address": from_addr},
+        "text": "\n".join(text_parts),
+        "html": html_parts,  # list, matching the mail.tm message shape
+    }
+
+
+def _fetch_gmail_messages(alias):
+    """Connect, find, and parse all messages delivered to `alias`."""
+    conn = _gmail_connect()
+    try:
+        uids = _gmail_search_uids_for_alias(conn, alias)
+        messages = []
+        for uid in uids:
+            typ, data = conn.uid("fetch", uid, "(RFC822)")
+            if typ != "OK" or not data:
+                continue
+            # The raw message is the body of a (header, body) tuple; the server may
+            # also interleave bare bytes (e.g. b')'), so pick the first valid tuple.
+            raw = next(
+                (item[1] for item in data
+                 if isinstance(item, tuple) and len(item) >= 2 and item[1]),
+                None,
+            )
+            if raw is None:
+                continue
+            messages.append(_parse_imap_message(raw, uid))
+        return messages
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+def _wait_for_credentials_email_gmail(alias, max_wait_seconds):
+    """Poll the Gmail inbox for the credentials email delivered to `alias`."""
+    print(f"[*] Waiting for credentials email at {alias} (max {max_wait_seconds}s / {max_wait_seconds//60} minutes)...")
+    deadline = time.time() + max_wait_seconds
+    attempt = 0
+
+    while time.time() < deadline:
+        attempt += 1
+        remaining = int(deadline - time.time())
+        print(f"[*] Checking Gmail inbox for {alias} (attempt {attempt}, {remaining}s remaining)...")
+
+        try:
+            messages = _fetch_gmail_messages(alias)
+        except Exception as exc:
+            print(f"[!] Gmail IMAP check failed: {exc}")
+            messages = []
+
+        result = _scan_messages_for_credentials(messages, fetch_full=lambda m: m)
+        if result:
+            return result
+
+        if messages:
+            print(f"[*] Found {len(messages)} email(s) for this alias, but credentials email not yet received")
+        else:
+            print("[*] No mail for this alias yet")
+
+        print(f"[*] Waiting {EMAIL_POLL_SECONDS}s before next check...")
+        time.sleep(EMAIL_POLL_SECONDS)
+
+    print(f"[!] Timeout: Credentials email not received after {max_wait_seconds}s")
+    return None
+
+
+# ═══════════════════════════════════════════════════════════
+# tempmail.lol Backend
+# ═══════════════════════════════════════════════════════════
+
+# Domains we already know IPTVV's checkout rejects as disposable; if tempmail.lol
+# rotates onto one of these, regenerate to get a clean domain.
+TEMPMAILLOL_BLOCKED_DOMAINS = {
+    "mailto.plus", "fexpost.com", "fexbox.org", "fextemp.com", "any.pink",
+    "merepost.com", "rover.info", "chitthi.in", "mailisk.com",
+}
+
+
+def _tempmaillol_headers():
+    """Auth header for tempmail.lol when an API key is configured (optional)."""
+    return {"Authorization": TEMPMAILLOL_API_KEY} if TEMPMAILLOL_API_KEY else {}
+
+
+def create_tempmaillol_inbox():
+    """
+    Create a temporary inbox via the tempmail.lol API.
 
     Returns:
-        dict: Full message object with credentials, or None if timeout
+        tuple: (email_address, token) or (None, None) on failure
     """
+    try:
+        # When a specific domain is requested (or a key is set), use the v2 create
+        # endpoint which accepts a domain; otherwise use the simple free /generate.
+        if TEMPMAILLOL_DOMAIN or TEMPMAILLOL_API_KEY:
+            payload = {"domain": TEMPMAILLOL_DOMAIN} if TEMPMAILLOL_DOMAIN else {}
+            response = requests.post(
+                f"{TEMPMAILLOL_API_BASE}/v2/inbox/create",
+                json=payload,
+                headers=_tempmaillol_headers(),
+                timeout=15,
+            )
+            response.raise_for_status()
+            data = response.json()
+            address = data.get("address")
+            token = data.get("token")
+        else:
+            # Free endpoint; retry a few times if it rotates onto a blocked domain.
+            address = token = None
+            for _ in range(5):
+                response = requests.get(f"{TEMPMAILLOL_API_BASE}/generate", timeout=15)
+                response.raise_for_status()
+                data = response.json()
+                address = data.get("address")
+                token = data.get("token")
+                domain = (address or "").split("@")[-1].lower()
+                # Match the apex domain (e.g. blocklist "fexpost.com" vs "x.fexpost.com").
+                apex = ".".join(domain.split(".")[-2:])
+                if domain not in TEMPMAILLOL_BLOCKED_DOMAINS and apex not in TEMPMAILLOL_BLOCKED_DOMAINS:
+                    break
+                print(f"[*] tempmail.lol gave a blocklisted domain ({domain}); regenerating...")
+
+        if not address or not token:
+            raise RuntimeError("tempmail.lol did not return an address/token")
+
+        print(f"[OK] tempmail.lol inbox created: {address}")
+        return address, token
+
+    except Exception as exc:
+        print(f"[!] Failed to create tempmail.lol inbox: {exc}")
+        return None, None
+
+
+def get_tempmaillol_messages(token):
+    """
+    Fetch messages from a tempmail.lol inbox and normalize them to the shared shape.
+
+    Each tempmail.lol email has {from, to, subject, body, html, date, ip}; the body is
+    returned inline (no separate fetch-by-id call), so the normalized message already
+    carries 'text'/'html' for extract_credentials_from_email().
+    """
+    try:
+        response = requests.get(
+            f"{TEMPMAILLOL_API_BASE}/auth/{token}",
+            headers=_tempmaillol_headers(),
+            timeout=15,
+        )
+        response.raise_for_status()
+        emails = response.json().get("email", []) or []
+
+        messages = []
+        for idx, item in enumerate(emails):
+            html_value = item.get("html")
+            raw_from = item.get("from", "") or ""
+            # tempmail.lol may include a display name ("Name <addr>"); keep just the addr.
+            addr_match = re.search(r"<([^>]+)>", raw_from)
+            from_addr = addr_match.group(1).strip() if addr_match else raw_from.strip()
+            messages.append({
+                "id": str(item.get("date", idx)),
+                "subject": item.get("subject", "") or "",
+                "from": {"address": from_addr},
+                "text": item.get("body", "") or "",
+                "html": [html_value] if html_value else [],
+            })
+        return messages
+    except Exception as exc:
+        print(f"[!] Failed to fetch tempmail.lol messages: {exc}")
+        return []
+
+
+def _wait_for_credentials_email_tempmaillol(token, max_wait_seconds):
+    """Poll the tempmail.lol inbox until the credentials email arrives."""
+    print(f"[*] Waiting for credentials email (max {max_wait_seconds}s / {max_wait_seconds//60} minutes)...")
+    deadline = time.time() + max_wait_seconds
+    attempt = 0
+
+    while time.time() < deadline:
+        attempt += 1
+        remaining = int(deadline - time.time())
+        print(f"[*] Checking tempmail.lol inbox (attempt {attempt}, {remaining}s remaining)...")
+
+        messages = get_tempmaillol_messages(token)
+
+        # Bodies are inline, so fetch_full is the identity function.
+        result = _scan_messages_for_credentials(messages, fetch_full=lambda m: m)
+        if result:
+            return result
+
+        if messages:
+            print(f"[*] Found {len(messages)} email(s), but credentials email not yet received")
+        else:
+            print("[*] Inbox is empty")
+
+        print(f"[*] Waiting {EMAIL_POLL_SECONDS}s before next check...")
+        time.sleep(EMAIL_POLL_SECONDS)
+
+    print(f"[!] Timeout: Credentials email not received after {max_wait_seconds}s")
+    return None
+
+
+def _wait_for_credentials_email_mailtm(auth_token, max_wait_seconds):
+    """Poll the mail.tm temporary inbox until the credentials email arrives."""
     print(f"[*] Waiting for credentials email (max {max_wait_seconds}s / {max_wait_seconds//60} minutes)...")
     deadline = time.time() + max_wait_seconds
     attempt = 0
@@ -217,56 +623,79 @@ def wait_for_credentials_email(auth_token, max_wait_seconds=EMAIL_MAX_WAIT_SECON
 
         messages = get_mailtm_messages(auth_token)
 
-        # Look for email from IPTVV Canada with credentials
-        for msg in messages:
-            subject = msg.get("subject", "")
-            from_addr = msg.get("from", {}).get("address", "")
-
-            print(f"    - From: {from_addr}, Subject: {subject}")
-
-            lowered_subject = subject.lower()
-            rejection_markers = [
-                "already used",
-                "duplicate trial",
-                "trial was already used",
-                "order was cancelled",
-                "order was canceled",
-            ]
-
-            if "iptvv" in from_addr.lower() and any(marker in lowered_subject for marker in rejection_markers):
-                full_message = get_mailtm_message_by_id(auth_token, msg["id"])
-                preview = ""
-                if full_message:
-                    preview = full_message.get("text", "")[:500].strip()
-                raise TrialRejectedError(
-                    f"IPTVV refused to issue trial credentials: {subject}. "
-                    f"Message preview: {preview}"
-                )
-
-            # Check if this is the credentials email (check multiple subject patterns)
-            is_credentials_email = False
-            for pattern in CREDENTIALS_EMAIL_SUBJECTS:
-                if pattern.lower() in lowered_subject:
-                    is_credentials_email = True
-                    break
-
-            if is_credentials_email:
-                print(f"[OK] Credentials email found!")
-                # Fetch full message content
-                full_message = get_mailtm_message_by_id(auth_token, msg["id"])
-                if full_message:
-                    return full_message
+        result = _scan_messages_for_credentials(
+            messages,
+            fetch_full=lambda m: get_mailtm_message_by_id(auth_token, m["id"]),
+        )
+        if result:
+            return result
 
         if messages:
             print(f"[*] Found {len(messages)} email(s), but credentials email not yet received")
         else:
-            print(f"[*] Inbox is empty")
+            print("[*] Inbox is empty")
 
         print(f"[*] Waiting {EMAIL_POLL_SECONDS}s before next check...")
         time.sleep(EMAIL_POLL_SECONDS)
 
     print(f"[!] Timeout: Credentials email not received after {max_wait_seconds}s")
     return None
+
+
+# ═══════════════════════════════════════════════════════════
+# Email Backend Dispatch
+# ═══════════════════════════════════════════════════════════
+
+def create_email_account():
+    """Create/allocate a receiving email address using the configured backend.
+
+    Returns a session dict (always includes 'address' and 'backend') or None on failure.
+    """
+    if IPTVV_EMAIL_BACKEND == "mailtm":
+        address, password, auth_token = create_mailtm_account()
+        if not address:
+            return None
+        return {"backend": "mailtm", "address": address, "password": password, "token": auth_token}
+
+    if IPTVV_EMAIL_BACKEND == "tempmaillol":
+        address, token = create_tempmaillol_inbox()
+        if not address:
+            return None
+        return {"backend": "tempmaillol", "address": address, "token": token}
+
+    # Default: Gmail IMAP backend (custom-domain catch-all, or plus-alias fallback).
+    if not IPTVV_GMAIL_ADDRESS or not IPTVV_GMAIL_APP_PASSWORD:
+        print("[!] Gmail email backend requires IPTVV_GMAIL_ADDRESS and IPTVV_GMAIL_APP_PASSWORD")
+        return None
+
+    alias = build_gmail_alias()
+    scheme = f"catch-all @{IPTVV_EMAIL_DOMAIN}" if IPTVV_EMAIL_DOMAIN else "plus-alias"
+    print(f"[*] Generated receiving address ({scheme}): {alias}")
+
+    # Verify IMAP login up front so we fail fast before submitting checkout.
+    try:
+        conn = _gmail_connect()
+        conn.logout()
+        print(f"[OK] Gmail IMAP login verified ({IPTVV_GMAIL_ADDRESS})")
+    except Exception as exc:
+        print(f"[!] Gmail IMAP login failed: {exc}")
+        return None
+
+    return {"backend": "gmail", "address": alias}
+
+
+def wait_for_credentials_email(email_session, max_wait_seconds=EMAIL_MAX_WAIT_SECONDS):
+    """Dispatch to the configured backend's polling loop.
+
+    Returns:
+        dict: Full message object with 'text'/'html', or None if timeout.
+    """
+    backend = email_session.get("backend")
+    if backend == "mailtm":
+        return _wait_for_credentials_email_mailtm(email_session["token"], max_wait_seconds)
+    if backend == "tempmaillol":
+        return _wait_for_credentials_email_tempmaillol(email_session["token"], max_wait_seconds)
+    return _wait_for_credentials_email_gmail(email_session["address"], max_wait_seconds)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -286,26 +715,128 @@ def get_random_user_agent():
     return random.choice(user_agents)
 
 
+def build_iptvv_proxy():
+    """Parse IPTVV_PROXY_URL into a proxy dict, or None when disabled/unset.
+
+    Returns {'host', 'port', 'user', 'password'} for an authenticated HTTP proxy
+    (e.g. Apify residential)."""
+    if not USE_IPTVV_PROXY or not IPTVV_PROXY_URL:
+        return None
+    parsed = urlparse(IPTVV_PROXY_URL)
+    if not parsed.hostname or not parsed.port:
+        print("[!] USE_IPTVV_PROXY is True but IPTVV_PROXY_URL is malformed")
+        return None
+    return {
+        "host": parsed.hostname,
+        "port": str(parsed.port),
+        "user": parsed.username or "",
+        "password": parsed.password or "",
+    }
+
+
+def create_proxy_auth_extension(host, port, user, password):
+    """Build an unpacked Chrome extension that points Chrome at an authenticated
+    proxy and answers the proxy Basic-auth challenge automatically.
+
+    Chrome's --proxy-server flag cannot carry user:pass credentials, so for an
+    authenticated proxy we inject them via chrome.webRequest.onAuthRequired.
+    Returns the path to a temp directory holding the unpacked extension (caller
+    is responsible for cleanup)."""
+    ext_dir = tempfile.mkdtemp(prefix='iptvv_proxy_ext_')
+
+    manifest = {
+        "version": "1.0.0",
+        "manifest_version": 2,
+        "name": "Proxy Auth",
+        "permissions": [
+            "proxy",
+            "tabs",
+            "unlimitedStorage",
+            "storage",
+            "<all_urls>",
+            "webRequest",
+            "webRequestBlocking",
+        ],
+        "background": {"scripts": ["background.js"]},
+        "minimum_chrome_version": "22.0.0",
+    }
+
+    background_js = """
+var config = {
+    mode: "fixed_servers",
+    rules: {
+        singleProxy: {
+            scheme: "http",
+            host: "%s",
+            port: parseInt("%s")
+        },
+        bypassList: ["localhost"]
+    }
+};
+chrome.proxy.settings.set({value: config, scope: "regular"}, function() {});
+function callbackFn(details) {
+    return {
+        authCredentials: {
+            username: "%s",
+            password: "%s"
+        }
+    };
+}
+chrome.webRequest.onAuthRequired.addListener(
+    callbackFn,
+    {urls: ["<all_urls>"]},
+    ["blocking"]
+);
+""" % (host, port, user, password)
+
+    with open(os.path.join(ext_dir, 'manifest.json'), 'w') as f:
+        json.dump(manifest, f)
+    with open(os.path.join(ext_dir, 'background.js'), 'w') as f:
+        f.write(background_js)
+
+    return ext_dir
+
+
 def get_driver():
     """Initialize Chrome WebDriver with anti-detection options (undetected-chromedriver).
 
-    Always uses a direct connection on the host's public IP; no proxy.
+    Uses a direct connection on the host's public IP by default. When
+    USE_IPTVV_PROXY is enabled, the browser egress is routed through the
+    authenticated proxy in IPTVV_PROXY_URL via an injected auth extension.
     """
     headless_mode = os.getenv("HEADLESS", "True").lower() == "true"
 
     # Use undetected-chromedriver's ChromeOptions
     options = uc.ChromeOptions()
 
-    if headless_mode:
+    # Determine proxy first: the MV2 proxy-auth extension does not load reliably
+    # under --headless=new, so when a proxy is active and a virtual display
+    # (Xvfb DISPLAY=:99 in Docker) is available we run headed against it instead.
+    proxy = build_iptvv_proxy()
+    proxy_ext_dir = None
+    has_display = os.environ.get("DISPLAY") is not None
+    use_headless_new = headless_mode and not (proxy and has_display)
+
+    if not headless_mode:
+        options.add_argument("--start-maximized")
+        print("[*] Running in GUI mode")
+    elif use_headless_new:
         options.add_argument("--headless=new")
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
         print("[*] Running in HEADLESS mode")
+        if proxy and not has_display:
+            print("[!] Proxy enabled but no DISPLAY found; the proxy-auth "
+                  "extension may not load under --headless=new (expect 407).")
     else:
-        options.add_argument("--start-maximized")
-        print("[*] Running in GUI mode")
+        # Headless requested but proxy needs a real display -> headed via Xvfb.
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+        print(f"[*] Running headed against virtual display "
+              f"(DISPLAY={os.environ.get('DISPLAY')}) for proxy-auth extension")
 
     # Use random user agent for additional anonymity
     random_ua = get_random_user_agent()
@@ -328,15 +859,25 @@ def get_driver():
         "profile.managed_default_content_settings.images": 1,  # Enable images
     }
 
-    # Always use a direct connection (no proxy). Explicitly disable any proxy
-    # to prevent ERR_NO_SUPPORTED_PROXIES from a leaked system/env proxy setting.
-    options.add_argument("--no-proxy-server")
-    prefs["proxy"] = {
-        "mode": "direct",
-        "pac_url": "",
-        "bypass_list": ""
-    }
-    print("[*] Using direct connection (public IP, no proxy)")
+    if proxy:
+        # Authenticated proxy (e.g. Apify residential) -> Chrome's --proxy-server
+        # flag can't carry credentials, so inject them via an auth extension.
+        proxy_ext_dir = create_proxy_auth_extension(
+            proxy["host"], proxy["port"], proxy["user"], proxy["password"]
+        )
+        options.add_argument(f"--load-extension={proxy_ext_dir}")
+        print(f"[*] Using Apify proxy via extension: {proxy['host']}:{proxy['port']} "
+              f"(user={proxy['user']})")
+    else:
+        # Direct connection (no proxy). Explicitly disable any proxy to prevent
+        # ERR_NO_SUPPORTED_PROXIES from a leaked system/env proxy setting.
+        options.add_argument("--no-proxy-server")
+        prefs["proxy"] = {
+            "mode": "direct",
+            "pac_url": "",
+            "bypass_list": ""
+        }
+        print("[*] Using direct connection (public IP, no proxy)")
 
     options.add_experimental_option("prefs", prefs)
 
@@ -367,6 +908,9 @@ def get_driver():
                 regular_options.add_experimental_option(key, value)
 
         driver = webdriver.Chrome(service=service, options=regular_options)
+
+    # Remember the proxy extension temp dir (if any) so callers can clean it up.
+    driver._proxy_ext_dir = proxy_ext_dir
 
     return driver
 
@@ -980,85 +1524,54 @@ def fill_checkout_form(driver, email_address):
         pass
 
     # IPTVV.ca CUSTOM REQUIRED FIELDS
-    # Handle "Device Select" checkboxes (required by IPTVV.ca)
-    print("[*] Looking for device selection checkboxes...")
-    device_filled = False
-    try:
-        # Find device checkboxes by name="device_select[]"
-        device_checkboxes = driver.find_elements(By.NAME, "device_select[]")
-        if device_checkboxes:
-            print(f"[*] Found {len(device_checkboxes)} device checkboxes")
-            # Check the first device checkbox (Android TV Box or Firestick)
-            for checkbox in device_checkboxes:
-                value = checkbox.get_attribute("value") or ""
-                # Prefer Android Box or Smart TV
-                if value in ["androidbox", "smarttv", "firetv"]:
-                    if not checkbox.is_selected():
-                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", checkbox)
-                        time.sleep(0.3)
-                        safe_click(driver, checkbox)
-                        print(f"[OK] Selected device: {value}")
-                        filled_fields.append("device_select")
-                        device_filled = True
-                        break
-
-            # Fallback: check first device if none selected
-            if not device_filled and len(device_checkboxes) > 0:
-                checkbox = device_checkboxes[0]
-                if not checkbox.is_selected():
-                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", checkbox)
-                    time.sleep(0.3)
-                    safe_click(driver, checkbox)
-                    value = checkbox.get_attribute("value") or "first"
-                    print(f"[OK] Selected device (first): {value}")
-                    filled_fields.append("device_select")
-                    device_filled = True
-        else:
-            print("[!] No device checkboxes found with name='device_select[]'")
-    except Exception as e:
-        print(f"[!] Device checkbox error: {e}")
-
-    # Handle "Billing Channel Packages" field (required by IPTVV.ca)
-    # This might be a multiselect, checkbox group, or hidden field
-    try:
-        # Strategy 1: Try to find checkboxes or radio buttons for packages
-        package_checkboxes = driver.find_elements(By.XPATH, "//input[@type='checkbox' and (contains(@id, 'channel') or contains(@name, 'channel') or contains(@id, 'package') or contains(@name, 'package'))]")
-        if package_checkboxes:
-            # Check all packages (or first one for "full channel")
-            for checkbox in package_checkboxes[:1]:  # Select first/main package
-                if not checkbox.is_selected():
-                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", checkbox)
-                    time.sleep(0.3)
-                    safe_click(driver, checkbox)
-                    print(f"[OK] Selected channel package checkbox")
-                    filled_fields.append("billing_channel_packages")
-                    break
-
-        # Strategy 2: Try to find a select dropdown for packages
-        else:
-            for package_id in ["billing_channel_packages", "billing_packages", "channel_packages", "packages"]:
+    # The checkout flags every UNCHECKED box in device_select[] and
+    # channels_select[] as invalid (an earlier run that ticked just one box per
+    # group was rejected with the other 9 device + 1 channel boxes still listed
+    # as required). So we must tick *all* checkboxes in both groups.
+    for group_name in ["device_select[]", "channels_select[]"]:
+        print(f"[*] Selecting all '{group_name}' checkboxes...")
+        try:
+            checkboxes = driver.find_elements(By.NAME, group_name)
+            if not checkboxes:
+                print(f"[!] No checkboxes found with name='{group_name}'")
+                continue
+            checked = 0
+            for checkbox in checkboxes:
                 try:
-                    package_field = driver.find_element(By.ID, package_id)
-                    if package_field.tag_name == "select":
-                        select = Select(package_field)
-                        # Select option containing "full" or "all" or just first option
-                        selected = False
-                        for option in select.options:
-                            if "full" in option.text.lower() or "all" in option.text.lower():
-                                select.select_by_visible_text(option.text)
-                                print(f"[OK] Selected package: {option.text}")
-                                filled_fields.append("billing_channel_packages")
-                                selected = True
-                                break
-                        if not selected and len(select.options) > 1:
-                            select.select_by_index(1)
-                            print(f"[OK] Selected package (first option): {select.options[1].text}")
-                            filled_fields.append("billing_channel_packages")
-                        break
-                except:
-                    continue
-    except Exception as e:
-        print(f"[!] Could not find or fill channel packages field: {e}")
+                    if not checkbox.is_selected():
+                        # Set checked + fire change so both the native POST and any
+                        # client-side validation see every box as selected.
+                        driver.execute_script(
+                            "arguments[0].scrollIntoView({block:'center'});"
+                            "arguments[0].checked = true;"
+                            "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));"
+                            "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));",
+                            checkbox,
+                        )
+                    checked += 1
+                except Exception as exc:
+                    print(f"[!] Could not check a '{group_name}' box: {exc}")
+            print(f"[OK] Selected {checked}/{len(checkboxes)} '{group_name}' checkboxes")
+            filled_fields.append(group_name)
+        except Exception as exc:
+            print(f"[!] '{group_name}' selection error: {exc}")
+
+    # Ticking the "Other (specify)" device box makes its companion text field
+    # (device_other) required; an empty one is rejected server-side with
+    # "Please specify your device." Set it via JS so it works even while the
+    # field is still hidden by the conditional-logic script.
+    try:
+        device_other = driver.find_element(By.ID, "device_other")
+        driver.execute_script(
+            "arguments[0].value = arguments[1];"
+            "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
+            "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
+            device_other, "Smart TV",
+        )
+        print("[OK] Filled device_other: Smart TV")
+        filled_fields.append("device_other")
+    except Exception as exc:
+        print(f"[!] Could not fill device_other: {exc}")
 
     print(f"[OK] Filled {len(filled_fields)} fields: {', '.join(filled_fields)}")
     print(f"[*] Using email: {email_address}")
@@ -1291,7 +1804,7 @@ def extract_credentials_from_email(message):
         match = re.search(pattern, normalized, re.I)
         if match:
             password = match.group(1).strip()
-            print(f"[*] Found password: {password}")
+            print(f"[*] Found password: {_redact(password)}")
             break
 
     # Hostname/Server Address patterns
@@ -1345,6 +1858,10 @@ def save_to_iboplayer(username, password, hostname, max_retries=3):
         print(f"    - IPTVV_IBOPLAYER_PLAYLIST_URL_ID: {'Set' if IPTVV_IBOPLAYER_PLAYLIST_URL_ID else 'Missing'}")
         return False
 
+    if not hostname:
+        print("[!] Cannot save to IBO Player: missing hostname/server URL from credentials")
+        return False
+
     api_url = "https://iboplayer.com/frontend/device/savePlaylist"
 
     headers = {
@@ -1375,7 +1892,7 @@ def save_to_iboplayer(username, password, hostname, max_retries=3):
     print(f"[*] Playlist Name: {IPTVV_IBOPLAYER_PLAYLIST_NAME}")
     print(f"[*] Playlist URL: {playlist_url}")
     print(f"[*] Username: {username}")
-    print(f"[*] Password: {password}")
+    print(f"[*] Password: {_redact(password)}")
     print("=" * 60)
 
     for attempt in range(1, max_retries + 1):
@@ -1388,12 +1905,33 @@ def save_to_iboplayer(username, password, hostname, max_retries=3):
             )
 
             if response.status_code == 200:
-                print(f"[OK] Playlist saved to IBO Player successfully!")
+                body = response.text or ""
+                content_type = response.headers.get("Content-Type", "").lower()
                 try:
                     response_data = response.json()
+                except ValueError:
+                    response_data = None
+
+                # An expired session cookie is bounced to a login page, which the
+                # endpoint returns as HTML with a 200 status. Treat that as failure.
+                head = body[:200].lower()
+                if response_data is None and ("text/html" in content_type
+                                              or "<html" in head or "login" in head):
+                    print("[!] IBO Player returned an HTML/login page on a 200 response.")
+                    print("[!] The IPTVV_IBOPLAYER_COOKIE has likely expired - refresh it.")
+                    return False
+
+                # If the body is JSON, honour an explicit failure flag.
+                if isinstance(response_data, dict):
+                    status_val = response_data.get("status", response_data.get("success"))
+                    if status_val in (False, 0, "0", "false", "error"):
+                        print(f"[!] IBO Player reported failure in a 200 response: {response_data}")
+                        return False
                     print(f"[*] IBO Player response: {response_data}")
-                except:
-                    pass
+                else:
+                    print(f"[*] IBO Player response (non-JSON): {body[:200]}")
+
+                print(f"[OK] Playlist saved to IBO Player successfully!")
                 return True
 
             elif 400 <= response.status_code < 500:
@@ -1517,12 +2055,13 @@ def main(user_id=None, callback_url=None):
         # Step 3: Select full channel package.
         select_full_channel_package(driver)
 
-        # Step 4: Create mail.tm account only after the checkout form is reachable.
-        email_address, email_password, auth_token = create_mailtm_account()
-        if not email_address:
-            raise RuntimeError("Failed to create mail.tm temporary email account")
+        # Step 4: Allocate the receiving email only after the checkout form is reachable.
+        email_session = create_email_account()
+        if not email_session:
+            raise RuntimeError("Failed to allocate a receiving email account")
+        email_address = email_session["address"]
 
-        # Step 5: Fill checkout form with mail.tm email
+        # Step 5: Fill checkout form with the receiving email
         fill_checkout_form(driver, email_address)
 
         # Step 6: Submit form
@@ -1530,10 +2069,10 @@ def main(user_id=None, callback_url=None):
 
         # Step 7: Wait for credentials email (this can take 5-45 minutes)
         print("\n" + "=" * 60)
-        print(f"[*] Order submitted! Monitoring mail.tm inbox: {email_address}")
+        print(f"[*] Order submitted! Monitoring inbox for: {email_address}")
         print("=" * 60 + "\n")
 
-        credentials_message = wait_for_credentials_email(auth_token)
+        credentials_message = wait_for_credentials_email(email_session)
         if not credentials_message:
             raise RuntimeError(f"Timeout: Credentials email not received after {EMAIL_MAX_WAIT_SECONDS} seconds")
 

@@ -2,7 +2,8 @@
 #
 # Simple script to run IPTVV Canada automation
 #
-# The automation always runs on the host's public IP (direct connection, no proxy).
+# Runs on the host's public IP by default; set USE_IPTVV_PROXY=True and
+# IPTVV_PROXY_URL in .env to route the checkout browser through a proxy.
 #
 # Usage:
 #   ./run_iptvv.sh                    # Run with default settings (headless)

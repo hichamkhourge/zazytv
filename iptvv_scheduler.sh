@@ -96,7 +96,7 @@ run_automation() {
     # Run the automation script
     cd "$SCRIPT_DIR" || exit 1
 
-    # Runs on the host's public IP (direct connection, no proxy).
+    # Runs on the host's public IP unless USE_IPTVV_PROXY/IPTVV_PROXY_URL are set in .env.
     # Headless mode, auto-exit
     HEADLESS=True AUTO_EXIT=True \
         IPTVV_DEBUG_DIR=/tmp \
