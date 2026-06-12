@@ -52,6 +52,10 @@ IPTVTUNE_BOUQUET_MODE = os.getenv("IPTVTUNE_BOUQUET_MODE", "all").lower()
 IPTVTUNE_PORTAL_HOST = os.getenv("IPTVTUNE_PORTAL_HOST", "")
 EMAIL_POLL_SECONDS = int(os.getenv("IPTVTUNE_EMAIL_POLL_SECONDS", "60"))
 EMAIL_MAX_WAIT_SECONDS = int(os.getenv("IPTVTUNE_EMAIL_MAX_WAIT_SECONDS", "3600"))
+# Must stay below Selenium's 120s HTTP transport timeout so a hung navigation raises
+# a catchable TimeoutException instead of killing the chromedriver connection.
+PAGE_LOAD_TIMEOUT_SECONDS = int(os.getenv("IPTVTUNE_PAGE_LOAD_TIMEOUT_SECONDS", "90"))
+PAGE_LOAD_RETRIES = int(os.getenv("IPTVTUNE_PAGE_LOAD_RETRIES", "3"))
 AUTO_EXIT = os.getenv("AUTO_EXIT", "True").lower() == "true"
 
 # IBO Player playlist update (optional): push the extracted Xtream credentials into an
@@ -61,12 +65,21 @@ IBOPLAYER_COOKIE = os.getenv("IBOPLAYER_COOKIE", "")
 IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID = os.getenv("IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID", "")
 IPTVTUNE_IBOPLAYER_PLAYLIST_NAME = os.getenv("IPTVTUNE_IBOPLAYER_PLAYLIST_NAME", "iptvtune")
 
+# Second IBO Player device (selected with --iboplayer-account 2): its own session
+# cookie and playlist, independent of the shared IBOPLAYER_COOKIE above.
+IBOPLAYER_COOKIE_2 = os.getenv("IBOPLAYER_COOKIE_2", "")
+IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID_2 = os.getenv("IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID_2", "")
+IPTVTUNE_IBOPLAYER_PLAYLIST_NAME_2 = os.getenv("IPTVTUNE_IBOPLAYER_PLAYLIST_NAME_2", "iptvtune 2")
+
 READY_EMAIL_SUBJECT = os.getenv("IPTVTUNE_READY_EMAIL_SUBJECT", "IPTV Access Information")
 solver = TwoCaptcha(TWOCAPTCHA_API_KEY) if TWOCAPTCHA_API_KEY else None
 
 
 def get_driver():
     options = Options()
+    # Return from driver.get() at DOMContentLoaded instead of waiting for every slow
+    # third-party resource; all navigations are followed by explicit WebDriverWait calls.
+    options.page_load_strategy = "eager"
     headless_mode = os.getenv("HEADLESS", "True").lower() == "true"
 
     if headless_mode:
@@ -89,7 +102,34 @@ def get_driver():
         print("[*] Downloading/verifying ChromeDriver...")
         service = Service(ChromeDriverManager().install())
 
-    return webdriver.Chrome(service=service, options=options)
+    driver = webdriver.Chrome(service=service, options=options)
+    driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT_SECONDS)
+    return driver
+
+
+def load_page(driver, url, retries=None):
+    """Navigate to url with a bounded page-load timeout and retries.
+
+    iptvtune.com sometimes hangs while loading; without this, driver.get() blocks past
+    Selenium's transport timeout and the whole run dies with an unrecoverable
+    ReadTimeoutError. Retrying the navigation recovers those runs.
+    """
+    retries = PAGE_LOAD_RETRIES if retries is None else retries
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            driver.get(url)
+            return
+        except Exception as exc:
+            last_error = exc
+            print(f"[!] Page load failed (attempt {attempt}/{retries}) for {url}: {exc}")
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
+            if attempt < retries:
+                time.sleep(5 * attempt)
+    raise last_error
 
 
 def safe_click(driver, el):
@@ -457,7 +497,7 @@ def ensure_product_configuration_page(driver):
 
 def configure_product(driver, bouquets=None):
     print(f"[*] Navigating to IPTVtune cart: {IPTVTUNE_CART_URL}")
-    driver.get(IPTVTUNE_CART_URL)
+    load_page(driver, IPTVTUNE_CART_URL)
     WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
     time.sleep(2)
     print(f"[*] Cart URL: {driver.current_url}")
@@ -806,7 +846,15 @@ def wait_for_ready_email(driver):
     while time.time() < deadline:
         attempt += 1
         print(f"[*] Checking IPTVtune email history (attempt {attempt})...")
-        driver.get(emails_url)
+        try:
+            load_page(driver, emails_url)
+        except Exception as exc:
+            # The order already went through at this point; keep polling until the
+            # deadline instead of failing the whole run on a transient load error.
+            print(f"[!] Could not load email history: {exc}")
+            print(f"[*] Retrying in {EMAIL_POLL_SECONDS}s...")
+            time.sleep(EMAIL_POLL_SECONDS)
+            continue
         WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         time.sleep(2)
 
@@ -841,7 +889,7 @@ def open_email_row(driver, row):
         if match:
             email_url = f"{IPTVTUNE_BASE_URL}/pay/{match.group(1)}"
             print(f"[*] Opening email URL: {email_url}")
-            driver.get(email_url)
+            load_page(driver, email_url)
             return
 
         existing_windows = set(driver.window_handles)
@@ -963,7 +1011,7 @@ def extract_credentials_from_ready_email(driver):
     return portal_url, username, password, m3u_url
 
 
-def save_to_iboplayer(username, password, hostname, max_retries=3):
+def save_to_iboplayer(username, password, hostname, max_retries=3, iboplayer_account=1):
     """
     Update the IBO Player playlist with the extracted Xtream credentials.
 
@@ -975,6 +1023,7 @@ def save_to_iboplayer(username, password, hostname, max_retries=3):
         password: IPTVtune Xtream password
         hostname: IPTVtune server/portal URL (e.g. http://tunestream.me:8080)
         max_retries: Maximum number of retry attempts (default: 3)
+        iboplayer_account: Which IBO Player device to push to (1=shared cookie, 2=second device)
 
     Returns:
         bool: True if successful, False otherwise
@@ -983,25 +1032,38 @@ def save_to_iboplayer(username, password, hostname, max_retries=3):
         print("[*] IBO Player integration is disabled (IPTVTUNE_IBOPLAYER_ENABLED=False)")
         return False
 
-    if not IBOPLAYER_COOKIE or not IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID:
-        print("[!] IBO Player integration enabled but missing required credentials:")
-        print(f"    - IBOPLAYER_COOKIE: {'Set' if IBOPLAYER_COOKIE else 'Missing'}")
-        print(f"    - IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID: {'Set' if IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID else 'Missing'}")
+    if iboplayer_account == 2:
+        cookie = IBOPLAYER_COOKIE_2
+        playlist_url_id = IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID_2
+        playlist_name = IPTVTUNE_IBOPLAYER_PLAYLIST_NAME_2
+        cookie_var = "IBOPLAYER_COOKIE_2"
+        url_id_var = "IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID_2"
+    else:
+        cookie = IBOPLAYER_COOKIE
+        playlist_url_id = IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID
+        playlist_name = IPTVTUNE_IBOPLAYER_PLAYLIST_NAME
+        cookie_var = "IBOPLAYER_COOKIE"
+        url_id_var = "IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID"
+
+    if not cookie or not playlist_url_id:
+        print(f"[!] IBO Player integration enabled but missing required credentials (account {iboplayer_account}):")
+        print(f"    - {cookie_var}: {'Set' if cookie else 'Missing'}")
+        print(f"    - {url_id_var}: {'Set' if playlist_url_id else 'Missing'}")
         return False
 
     api_url = "https://iboplayer.com/frontend/device/savePlaylist"
     headers = {
         "Content-Type": "application/json",
-        "Cookie": IBOPLAYER_COOKIE,
+        "Cookie": cookie,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     }
 
     playlist_url = hostname.rstrip("/")
     payload = {
-        "current_playlist_url_id": IPTVTUNE_IBOPLAYER_PLAYLIST_URL_ID,
+        "current_playlist_url_id": playlist_url_id,
         "password": password,
         "pin": "",
-        "playlist_name": IPTVTUNE_IBOPLAYER_PLAYLIST_NAME,
+        "playlist_name": playlist_name,
         "playlist_type": "xc",  # Xtream Codes format
         "playlist_url": playlist_url,
         "protect": "false",
@@ -1010,10 +1072,10 @@ def save_to_iboplayer(username, password, hostname, max_retries=3):
     }
 
     print("\n" + "=" * 60)
-    print("[*] Saving playlist to IBO Player...")
+    print(f"[*] Saving playlist to IBO Player (account {iboplayer_account})...")
     print("=" * 60)
     print(f"[*] API URL: {api_url}")
-    print(f"[*] Playlist Name: {IPTVTUNE_IBOPLAYER_PLAYLIST_NAME}")
+    print(f"[*] Playlist Name: {playlist_name}")
     print(f"[*] Playlist URL: {playlist_url}")
     print(f"[*] Username: {username}")
     print(f"[*] Password: {password}")
@@ -1082,7 +1144,7 @@ def send_webhook_callback(callback_url, user_id, status, username=None, password
     return False
 
 
-def main(user_id=None, callback_url=None, bouquets=None):
+def main(user_id=None, callback_url=None, bouquets=None, iboplayer_account=1):
     driver = get_driver()
     is_laravel_mode = bool(user_id and callback_url)
 
@@ -1090,6 +1152,7 @@ def main(user_id=None, callback_url=None, bouquets=None):
     print(f"[*] User ID: {user_id if user_id else 'N/A'}")
     print(f"[*] Callback URL: {callback_url if callback_url else 'N/A'}")
     print(f"[*] Bouquets: {bouquets if bouquets else 'Default (all)'}")
+    print(f"[*] IBO Player account: {iboplayer_account}")
     print(f"[*] Laravel integration mode: {is_laravel_mode}")
 
     try:
@@ -1099,7 +1162,7 @@ def main(user_id=None, callback_url=None, bouquets=None):
         host, username, password, m3u_url = extract_credentials_from_ready_email(driver)
 
         # Push the credentials into the configured IBO Player playlist (no-op if disabled).
-        ibo_saved = save_to_iboplayer(username, password, host)
+        ibo_saved = save_to_iboplayer(username, password, host, iboplayer_account=iboplayer_account)
 
         if is_laravel_mode:
             send_webhook_callback(
@@ -1168,6 +1231,13 @@ Examples:
     parser.add_argument("--user-id", type=int, help="Laravel IPTV account ID")
     parser.add_argument("--callback-url", type=str, help="Webhook callback URL")
     parser.add_argument("--bouquets", type=str, help="Comma-separated list of bouquet IDs (e.g., 1,3,60,63)")
+    parser.add_argument(
+        "--iboplayer-account",
+        type=int,
+        default=1,
+        choices=[1, 2],
+        help="Which IBO Player device to push credentials to (1=default shared cookie, 2=second device)",
+    )
     args = parser.parse_args()
 
     # Parse bouquet IDs from comma-separated string
@@ -1180,4 +1250,4 @@ Examples:
             print(f"[!] Invalid bouquet format: {e}")
             print("[*] Expected format: --bouquets 1,3,60,63")
 
-    main(user_id=args.user_id, callback_url=args.callback_url, bouquets=bouquet_list)
+    main(user_id=args.user_id, callback_url=args.callback_url, bouquets=bouquet_list, iboplayer_account=args.iboplayer_account)
