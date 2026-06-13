@@ -1,0 +1,6 @@
+# Shell scripts and the crontab must use LF line endings, otherwise a CRLF
+# shebang (#!/bin/bash\r) makes Linux/WSL fail with "required file not found"
+# and cron rejects the crontab. This overrides core.autocrlf=true on checkout.
+*.sh text eol=lf
+crontab text eol=lf
+docker-entrypoint.sh text eol=lf
