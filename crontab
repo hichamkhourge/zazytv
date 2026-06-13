@@ -21,5 +21,11 @@
 # IPTVtune Free Trial Automation (2nd account / 2nd IBO Player) - Runs every day at 8:00 AM
 0 */2 * * * cd /app && /usr/local/bin/python /app/iptvtune_automation.py --iboplayer-account 2 >> /var/log/cron.log 2>&1
 
+# ViewTVY Free Trial Automation - Runs every day at 9:00 AM
+0 9 * * * cd /app && /usr/local/bin/python /app/viewtvy_automation.py >> /var/log/cron.log 2>&1
+
+# ViewTVY Free Trial Automation (2nd account / 2nd IBO Player) - Runs every day at 10:00 AM
+0 10 * * * cd /app && /usr/local/bin/python /app/viewtvy_automation.py --iboplayer-account 2 >> /var/log/cron.log 2>&1
+
 # Keep cron happy with a newline at the end
 
