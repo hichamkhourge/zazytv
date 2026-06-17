@@ -11,6 +11,11 @@ Commands:
     /uzeen - Run uzeen playlist updater now
     /uzeen_status - Show current credentials
     /uzeen_history - Show credential change history
+    /viewtv - Run ViewTVY free-trial automation
+    /viewtv2 - Run ViewTVY free-trial automation (2nd IBO Player account)
+    /webest - Run WEBESTIPTV registration automation
+    /tune - Run IPTVtune free-trial automation
+    /tune2 - Run IPTVtune free-trial automation (2nd IBO Player account)
     /ping - Health check (bot is alive)
 
 Authorization:
@@ -50,10 +55,73 @@ STATE_FILE = "uzeen_playlist_state.json"
 HISTORY_FILE = "uzeen_credential_history.json"
 UPDATER_SCRIPT = "uzeen_playlist_updater.py"
 
+# Free-trial automation scripts (run in the background; they self-report results to
+# Telegram via telegram_notifier once the provider's credentials email arrives).
+VIEWTVY_SCRIPT = "viewtvy_automation.py"
+WEBEST_SCRIPT = "webestiptv_automation.py"
+IPTVTUNE_SCRIPT = "iptvtune_automation.py"
+
+# Track background automation processes so a second /command while one is still
+# running gives a clear "already running" reply instead of launching a duplicate
+# (each run is a heavyweight headless-Chrome session).
+_running = {}  # key -> subprocess.Popen
+
 
 def is_authorized(chat_id: int) -> bool:
     """Check if chat_id is authorized to use the bot."""
     return chat_id in AUTHORIZED_CHAT_IDS
+
+
+def _launch_automation(key: str, script: str, extra_args=None):
+    """Start an automation detached. Returns (proc, already_running)."""
+    proc = _running.get(key)
+    if proc and proc.poll() is None:
+        return proc, True
+
+    env = {**os.environ, "HEADLESS": "True", "AUTO_EXIT": "True"}
+    cmd = [sys.executable, script] + (extra_args or [])
+    log_path = f"/var/log/{key}.log"
+    try:
+        logf = open(log_path, "ab")
+    except OSError:
+        logf = subprocess.DEVNULL
+
+    proc = subprocess.Popen(
+        cmd, env=env, stdout=logf, stderr=logf, start_new_session=True
+    )
+    _running[key] = proc
+    return proc, False
+
+
+async def _run_automation_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                              *, key: str, label: str, script: str, extra_args=None):
+    """Shared handler: launch a free-trial automation in the background."""
+    chat_id = update.effective_chat.id
+
+    if not is_authorized(chat_id):
+        await update.message.reply_text("⛔ Unauthorized access.")
+        logger.warning(f"Unauthorized /{key} attempt from chat_id: {chat_id}")
+        return
+
+    proc, already = _launch_automation(key, script, extra_args)
+    if already:
+        await update.message.reply_text(
+            f"⏳ <b>{label}</b> is already running (PID {proc.pid}).\n"
+            f"You'll get a notification when it finishes.",
+            parse_mode='HTML'
+        )
+        logger.info(f"/{key} already running (pid={proc.pid}) for chat_id: {chat_id}")
+        return
+
+    await update.message.reply_text(
+        f"🚀 <b>Started {label}</b>\n\n"
+        f"This runs in the background and can take up to ~1 hour "
+        f"(it polls the provider's email for credentials).\n\n"
+        f"You'll get a Telegram message with the host, username and password "
+        f"when it finishes.",
+        parse_mode='HTML'
+    )
+    logger.info(f"Launched {key} (pid={proc.pid}) for chat_id: {chat_id}")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -76,6 +144,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/uzeen - Run uzeen playlist updater now\n"
         "/uzeen_status - Show current credentials\n"
         "/uzeen_history - Show credential change history\n"
+        "/viewtv - Run ViewTVY free trial\n"
+        "/viewtv2 - ViewTVY free trial (2nd IBO account)\n"
+        "/webest - Run WEBESTIPTV registration\n"
+        "/tune - Run IPTVtune free trial\n"
+        "/tune2 - IPTVtune free trial (2nd IBO account)\n"
         "/help - Show this help message\n"
         "/ping - Check if bot is alive\n\n"
         "The bot also runs automatically via cron every 6 hours."
@@ -107,6 +180,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  • Credential change timeline\n"
         "  • Time between changes\n"
         "  • Change patterns\n\n"
+        "<b>Free-trial automations</b> (run in background, ~up to 1h;\n"
+        "you get host/username/password when done):\n"
+        "<b>/viewtv</b> - ViewTVY free trial\n"
+        "<b>/viewtv2</b> - ViewTVY free trial (2nd IBO account)\n"
+        "<b>/webest</b> - WEBESTIPTV registration\n"
+        "<b>/tune</b> - IPTVtune free trial\n"
+        "<b>/tune2</b> - IPTVtune free trial (2nd IBO account)\n\n"
         "<b>/ping</b> - Bot health check\n\n"
         "<b>/help</b> - Show this message\n\n"
         "<b>Note:</b> Automated updates run every 6 hours via cron."
@@ -330,6 +410,38 @@ async def run_uzeen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error running uzeen updater for chat_id: {chat_id}: {e}", exc_info=True)
 
 
+async def run_viewtv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Trigger the ViewTVY free-trial automation."""
+    await _run_automation_cmd(update, context, key="viewtv",
+                              label="ViewTVY trial", script=VIEWTVY_SCRIPT)
+
+
+async def run_viewtv2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Trigger the ViewTVY free-trial automation for the 2nd IBO Player account."""
+    await _run_automation_cmd(update, context, key="viewtv2",
+                              label="ViewTVY trial (account 2)", script=VIEWTVY_SCRIPT,
+                              extra_args=["--iboplayer-account", "2"])
+
+
+async def run_webest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Trigger the WEBESTIPTV registration automation."""
+    await _run_automation_cmd(update, context, key="webest",
+                              label="WEBESTIPTV trial", script=WEBEST_SCRIPT)
+
+
+async def run_tune(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Trigger the IPTVtune free-trial automation."""
+    await _run_automation_cmd(update, context, key="tune",
+                              label="IPTVtune trial", script=IPTVTUNE_SCRIPT)
+
+
+async def run_tune2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Trigger the IPTVtune free-trial automation for the 2nd IBO Player account."""
+    await _run_automation_cmd(update, context, key="tune2",
+                              label="IPTVtune trial (account 2)", script=IPTVTUNE_SCRIPT,
+                              extra_args=["--iboplayer-account", "2"])
+
+
 def main():
     """Start the bot."""
     if not BOT_TOKEN:
@@ -346,7 +458,8 @@ def main():
     logger.info(f"Authorized chat IDs: {AUTHORIZED_CHAT_IDS}")
     logger.info(f"Poll interval: {POLL_INTERVAL}s")
     logger.info(f"Poll timeout: {POLL_TIMEOUT}s")
-    logger.info("Commands: /start, /help, /uzeen, /uzeen_status, /uzeen_history, /ping")
+    logger.info("Commands: /start, /help, /uzeen, /uzeen_status, /uzeen_history, "
+                "/viewtv, /viewtv2, /webest, /tune, /tune2, /ping")
     logger.info("="*70)
 
     # Create the Application
@@ -359,6 +472,11 @@ def main():
     application.add_handler(CommandHandler("uzeen", run_uzeen))
     application.add_handler(CommandHandler("uzeen_status", uzeen_status))
     application.add_handler(CommandHandler("uzeen_history", uzeen_history))
+    application.add_handler(CommandHandler("viewtv", run_viewtv))
+    application.add_handler(CommandHandler("viewtv2", run_viewtv2))
+    application.add_handler(CommandHandler("webest", run_webest))
+    application.add_handler(CommandHandler("tune", run_tune))
+    application.add_handler(CommandHandler("tune2", run_tune2))
 
     # Start the bot with long polling
     logger.info("Bot started! Polling for commands...")

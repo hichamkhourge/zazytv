@@ -56,6 +56,7 @@ COPY ugeen_multi_account.py .
 COPY iptvvcanada_automation.py .
 COPY iptvtune_automation.py .
 COPY viewtvy_automation.py .
+COPY webestiptv_automation.py .
 COPY telegram_notifier.py .
 COPY api_server.py .
 COPY telegram_bot.py .

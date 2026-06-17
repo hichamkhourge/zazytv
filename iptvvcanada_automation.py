@@ -47,6 +47,13 @@ IPTVV_CART_URL = os.getenv("IPTVV_CART_URL", f"{IPTVV_BASE_URL}/cart/")
 MAILTM_API_BASE = os.getenv("MAILTM_API_BASE", "https://api.mail.tm")
 EMAIL_POLL_SECONDS = int(os.getenv("IPTVV_EMAIL_POLL_SECONDS", "30"))
 EMAIL_MAX_WAIT_SECONDS = int(os.getenv("IPTVV_EMAIL_MAX_WAIT_SECONDS", "2700"))  # 45 minutes
+
+# Email backend:
+#   "procmail" (default) — api.procmail.xyz REST API (powers 8gwifi.org/temp-email.jsp).
+#                Pure HTTP: GET /generate for an address, GET /inbox/{addr} for messages.
+#   "mailtm"             — legacy mail.tm REST API (kept as a fallback).
+IPTVV_EMAIL_BACKEND = os.getenv("IPTVV_EMAIL_BACKEND", "procmail").strip().lower()
+PROCMAIL_API_BASE = os.getenv("PROCMAIL_API_BASE", "https://api.procmail.xyz").rstrip("/")
 AUTO_EXIT = os.getenv("AUTO_EXIT", "True").lower() == "true"
 IPTVV_PAGE_LOAD_RETRIES = int(os.getenv("IPTVV_PAGE_LOAD_RETRIES", "2"))
 IPTVV_CLOUDFLARE_WAIT_SECONDS = int(os.getenv("IPTVV_CLOUDFLARE_WAIT_SECONDS", "45"))
@@ -195,7 +202,61 @@ def get_mailtm_message_by_id(auth_token, message_id):
         return None
 
 
-def wait_for_credentials_email(auth_token, max_wait_seconds=EMAIL_MAX_WAIT_SECONDS):
+def _scan_messages_for_credentials(messages, fetch_full):
+    """Scan a batch of inbox messages for the IPTVV credentials (or rejection) email.
+
+    Args:
+        messages: list of message summaries, each a dict with at least
+                  'subject', 'from': {'address': ...} and 'id'.
+        fetch_full: callable(msg) -> full message body dict with 'text'/'html'.
+                    For mail.tm this fetches the body by id; for browser backends
+                    whose messages are already complete it can return msg unchanged.
+
+    Returns:
+        The full credentials message dict, or None if not present in this batch.
+
+    Raises:
+        TrialRejectedError: if a rejection email from IPTVV is seen.
+    """
+    rejection_markers = [
+        "already used",
+        "duplicate trial",
+        "trial was already used",
+        "order was cancelled",
+        "order was canceled",
+    ]
+
+    for msg in messages:
+        subject = msg.get("subject", "")
+        from_addr = msg.get("from", {}).get("address", "")
+
+        print(f"    - From: {from_addr}, Subject: {subject}")
+
+        lowered_subject = subject.lower()
+
+        if "iptvv" in from_addr.lower() and any(marker in lowered_subject for marker in rejection_markers):
+            full_message = fetch_full(msg)
+            preview = ""
+            if full_message:
+                preview = full_message.get("text", "")[:500].strip()
+            raise TrialRejectedError(
+                f"IPTVV refused to issue trial credentials: {subject}. "
+                f"Message preview: {preview}"
+            )
+
+        # Check if this is the credentials email (check multiple subject patterns)
+        for pattern in CREDENTIALS_EMAIL_SUBJECTS:
+            if pattern.lower() in lowered_subject:
+                print("[OK] Credentials email found!")
+                full_message = fetch_full(msg)
+                if full_message:
+                    return full_message
+                break
+
+    return None
+
+
+def _wait_for_credentials_email_mailtm(auth_token, max_wait_seconds=EMAIL_MAX_WAIT_SECONDS):
     """
     Poll mail.tm inbox until credentials email arrives.
 
@@ -216,57 +277,172 @@ def wait_for_credentials_email(auth_token, max_wait_seconds=EMAIL_MAX_WAIT_SECON
         print(f"[*] Checking mail.tm inbox (attempt {attempt}, {remaining}s remaining)...")
 
         messages = get_mailtm_messages(auth_token)
-
-        # Look for email from IPTVV Canada with credentials
-        for msg in messages:
-            subject = msg.get("subject", "")
-            from_addr = msg.get("from", {}).get("address", "")
-
-            print(f"    - From: {from_addr}, Subject: {subject}")
-
-            lowered_subject = subject.lower()
-            rejection_markers = [
-                "already used",
-                "duplicate trial",
-                "trial was already used",
-                "order was cancelled",
-                "order was canceled",
-            ]
-
-            if "iptvv" in from_addr.lower() and any(marker in lowered_subject for marker in rejection_markers):
-                full_message = get_mailtm_message_by_id(auth_token, msg["id"])
-                preview = ""
-                if full_message:
-                    preview = full_message.get("text", "")[:500].strip()
-                raise TrialRejectedError(
-                    f"IPTVV refused to issue trial credentials: {subject}. "
-                    f"Message preview: {preview}"
-                )
-
-            # Check if this is the credentials email (check multiple subject patterns)
-            is_credentials_email = False
-            for pattern in CREDENTIALS_EMAIL_SUBJECTS:
-                if pattern.lower() in lowered_subject:
-                    is_credentials_email = True
-                    break
-
-            if is_credentials_email:
-                print(f"[OK] Credentials email found!")
-                # Fetch full message content
-                full_message = get_mailtm_message_by_id(auth_token, msg["id"])
-                if full_message:
-                    return full_message
+        result = _scan_messages_for_credentials(
+            messages, fetch_full=lambda m: get_mailtm_message_by_id(auth_token, m["id"])
+        )
+        if result:
+            return result
 
         if messages:
             print(f"[*] Found {len(messages)} email(s), but credentials email not yet received")
         else:
-            print(f"[*] Inbox is empty")
+            print("[*] Inbox is empty")
 
         print(f"[*] Waiting {EMAIL_POLL_SECONDS}s before next check...")
         time.sleep(EMAIL_POLL_SECONDS)
 
     print(f"[!] Timeout: Credentials email not received after {max_wait_seconds}s")
     return None
+
+
+# ═══════════════════════════════════════════════════════════
+# procmail.xyz (8gwifi.org) email backend — pure REST API
+#
+# 8gwifi.org/temp-email.jsp is a thin front-end over api.procmail.xyz:
+#   GET /generate         -> plain-text address, e.g. "u6cvh398@goodbanners.xyz"
+#   GET /inbox/{address}  -> JSON array of {Sender, Subject, ReceivedAt,
+#                            PlainTextBody, HTMLBody}, or null when the inbox is
+#                            empty. Bodies are returned inline.
+# No browser, bot wall, or auth required, so we poll it directly with requests.
+# ═══════════════════════════════════════════════════════════
+def create_procmail_inbox():
+    """Generate a disposable address via api.procmail.xyz.
+
+    Returns the email address string, or None on failure.
+    """
+    try:
+        resp = requests.get(f"{PROCMAIL_API_BASE}/generate", timeout=15)
+        resp.raise_for_status()
+        address = resp.text.strip().strip('"')
+        if "@" not in address:
+            raise RuntimeError(f"unexpected /generate response: {address[:120]!r}")
+        print(f"[OK] procmail inbox created: {address}")
+        return address
+    except Exception as exc:
+        print(f"[!] Failed to create procmail inbox: {exc}")
+        return None
+
+
+def _decode_mime_header(value):
+    """Best-effort RFC 2047 decode of a MIME-encoded header (Subject/Sender)."""
+    if not value:
+        return ""
+    try:
+        from email.header import decode_header, make_header
+        return str(make_header(decode_header(value)))
+    except Exception:
+        return value
+
+
+def _decode_qp(value):
+    """Decode a quoted-printable body if it looks QP-encoded, else return as-is.
+
+    IPTVV's mail (and procmail's PlainTextBody/HTMLBody) is quoted-printable, so
+    "Username:=20ABC" / soft line breaks must be decoded before credential regexes
+    can match. Plain bodies are left untouched.
+    """
+    if not value:
+        return ""
+    if not re.search(r"=[0-9A-Fa-f]{2}|=\r?\n", value):
+        return value
+    try:
+        import quopri
+        return quopri.decodestring(value.encode("utf-8", "replace")).decode("utf-8", "replace")
+    except Exception:
+        return value
+
+
+def get_procmail_messages(address):
+    """Fetch the procmail inbox and normalize it to the shared message shape.
+
+    Each procmail message carries its body inline (PlainTextBody/HTMLBody), so the
+    normalized dict already holds 'text'/'html' for extract_credentials_from_email().
+    """
+    try:
+        resp = requests.get(
+            f"{PROCMAIL_API_BASE}/inbox/{requests.utils.quote(address)}",
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json() or []
+    except Exception as exc:
+        print(f"[!] Failed to fetch procmail inbox: {exc}")
+        return []
+
+    from email.utils import parseaddr
+
+    messages = []
+    for idx, item in enumerate(data):
+        raw_sender = item.get("Sender", "") or ""
+        from_addr = parseaddr(raw_sender)[1] or raw_sender
+        text_body = _decode_qp(item.get("PlainTextBody", "") or "")
+        html_body = _decode_qp(item.get("HTMLBody") or "")
+        messages.append({
+            "id": f"{item.get('ReceivedAt', idx)}-{idx}",
+            "subject": _decode_mime_header(item.get("Subject", "")),
+            "from": {"address": from_addr},
+            "text": text_body,
+            "html": [html_body] if html_body else [],
+        })
+    return messages
+
+
+def _wait_for_credentials_email_procmail(address, max_wait_seconds=EMAIL_MAX_WAIT_SECONDS):
+    """Poll the procmail inbox until the credentials email arrives."""
+    print(f"[*] Waiting for credentials email (max {max_wait_seconds}s / {max_wait_seconds//60} minutes)...")
+    deadline = time.time() + max_wait_seconds
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        remaining = int(deadline - time.time())
+        print(f"[*] Checking procmail inbox (attempt {attempt}, {remaining}s remaining)...")
+
+        messages = get_procmail_messages(address)
+        # Bodies are inline, so fetch_full is the identity function.
+        result = _scan_messages_for_credentials(messages, fetch_full=lambda m: m)
+        if result:
+            return result
+
+        if messages:
+            print(f"[*] Found {len(messages)} email(s), but credentials email not yet received")
+        else:
+            print("[*] Inbox is empty")
+
+        print(f"[*] Waiting {EMAIL_POLL_SECONDS}s before next check...")
+        time.sleep(EMAIL_POLL_SECONDS)
+
+    print(f"[!] Timeout: Credentials email not received after {max_wait_seconds}s")
+    return None
+
+
+# ═══════════════════════════════════════════════════════════
+# Email backend dispatchers (backend-agnostic entry points used by main())
+# ═══════════════════════════════════════════════════════════
+def create_email_session(driver=None):
+    """Allocate a receiving address using the configured backend (IPTVV_EMAIL_BACKEND).
+
+    Returns a session dict that always carries 'backend' and 'address', or None on
+    failure. 'driver' is accepted for API symmetry but unused by the HTTP backends.
+    """
+    if IPTVV_EMAIL_BACKEND == "mailtm":
+        address, password, auth_token = create_mailtm_account()
+        if not address:
+            return None
+        return {"backend": "mailtm", "address": address, "password": password, "token": auth_token}
+
+    # Default: procmail.xyz (8gwifi.org) REST API.
+    address = create_procmail_inbox()
+    if not address:
+        return None
+    return {"backend": "procmail", "address": address}
+
+
+def wait_for_credentials_email(driver, session, max_wait_seconds=EMAIL_MAX_WAIT_SECONDS):
+    """Dispatch inbox polling to the configured backend."""
+    backend = (session or {}).get("backend")
+    if backend == "mailtm":
+        return _wait_for_credentials_email_mailtm(session["token"], max_wait_seconds)
+    return _wait_for_credentials_email_procmail(session["address"], max_wait_seconds)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -339,6 +515,20 @@ def get_driver():
     print("[*] Using direct connection (public IP, no proxy)")
 
     options.add_experimental_option("prefs", prefs)
+
+    # Pin the real Chrome binary so undetected-chromedriver never auto-selects a
+    # broken snap wrapper (e.g. /usr/lib/chromium-browser, which raises
+    # PermissionError on some hosts). CHROME_BINARY overrides; otherwise pick the
+    # first installed Google Chrome (in Docker this resolves to google-chrome-stable).
+    chrome_binary = os.getenv("CHROME_BINARY", "").strip()
+    if not chrome_binary:
+        for candidate in ("/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"):
+            if os.path.exists(candidate):
+                chrome_binary = candidate
+                break
+    if chrome_binary:
+        options.binary_location = chrome_binary
+        print(f"[*] Using Chrome binary: {chrome_binary}")
 
     # Use undetected-chromedriver (no need for chromedriver path, it manages itself)
     try:
@@ -1517,12 +1707,13 @@ def main(user_id=None, callback_url=None):
         # Step 3: Select full channel package.
         select_full_channel_package(driver)
 
-        # Step 4: Create mail.tm account only after the checkout form is reachable.
-        email_address, email_password, auth_token = create_mailtm_account()
-        if not email_address:
-            raise RuntimeError("Failed to create mail.tm temporary email account")
+        # Step 4: Allocate a receiving address only after the checkout form is reachable.
+        email_session = create_email_session(driver)
+        if not email_session:
+            raise RuntimeError(f"Failed to create temporary email ({IPTVV_EMAIL_BACKEND} backend)")
+        email_address = email_session["address"]
 
-        # Step 5: Fill checkout form with mail.tm email
+        # Step 5: Fill checkout form with the temporary email
         fill_checkout_form(driver, email_address)
 
         # Step 6: Submit form
@@ -1530,10 +1721,10 @@ def main(user_id=None, callback_url=None):
 
         # Step 7: Wait for credentials email (this can take 5-45 minutes)
         print("\n" + "=" * 60)
-        print(f"[*] Order submitted! Monitoring mail.tm inbox: {email_address}")
+        print(f"[*] Order submitted! Monitoring {IPTVV_EMAIL_BACKEND} inbox: {email_address}")
         print("=" * 60 + "\n")
 
-        credentials_message = wait_for_credentials_email(auth_token)
+        credentials_message = wait_for_credentials_email(driver, email_session)
         if not credentials_message:
             raise RuntimeError(f"Timeout: Credentials email not received after {EMAIL_MAX_WAIT_SECONDS} seconds")
 

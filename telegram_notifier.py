@@ -99,13 +99,18 @@ class TelegramNotifier:
             silent=True
         )
 
-    def notify_success(self, m3u_url: Optional[str] = None, username: Optional[str] = None, balance: Optional[str] = None) -> bool:
+    def notify_success(self, m3u_url: Optional[str] = None, username: Optional[str] = None, balance: Optional[str] = None,
+                       *, host: Optional[str] = None, password: Optional[str] = None) -> bool:
         """Send notification when automation completes successfully."""
         details_text = ""
+        if host:
+            details_text += f"Host: {host}\n"
         if username:
             details_text += f"Username: {username}\n"
+        if password:
+            details_text += f"Password: {password}\n"
         if m3u_url:
-            details_text += f"M3U URL: {m3u_url[:50]}...\n"
+            details_text += f"M3U URL: {m3u_url}\n"
         if balance:
             details_text += f"\n💰 2captcha Balance: ${balance}"
 

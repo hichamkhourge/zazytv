@@ -1176,7 +1176,7 @@ def main(user_id=None, callback_url=None, bouquets=None, iboplayer_account=1):
                 bouquets=bouquets,
             )
         else:
-            notifier.notify_success(m3u_url, username, None)
+            notifier.notify_success(m3u_url, username, None, host=host, password=password)
             if IPTVTUNE_IBOPLAYER_ENABLED:
                 try:
                     notifier.notify_ibo_saved() if ibo_saved else notifier.notify_ibo_failed()

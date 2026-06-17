@@ -818,7 +818,7 @@ def main(user_id=None, callback_url=None, iboplayer_account=1):
                 m3u_url=m3u_url,
             )
         else:
-            notifier.notify_success(m3u_url, username, None)
+            notifier.notify_success(m3u_url, username, None, host=host, password=password)
 
         print("[OK] ViewTVY automation complete")
     except Exception as exc:
