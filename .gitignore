@@ -1,6 +1,9 @@
 # Environment variables (contains sensitive API keys and credentials)
 .env
 
+# Cached IBO Player bearer token (secret)
+iboplayer_token.json
+
 # Virtual environment
 venv/
 env/

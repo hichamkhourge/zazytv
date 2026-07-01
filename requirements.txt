@@ -7,8 +7,11 @@ selenium==4.41.0
 webdriver-manager==4.0.2
 undetected-chromedriver==3.5.5
 
-# 2captcha for automatic reCAPTCHA solving
+# 2captcha for automatic reCAPTCHA / image captcha solving
 2captcha-python==2.0.5
+
+# SVG rasterization for the iboplayer device-login captcha (needs libcairo2)
+cairosvg==2.7.1
 
 # Environment configuration
 python-dotenv==1.2.2

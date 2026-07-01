@@ -11,7 +11,10 @@ Usage:
 Environment Variables:
     UZEEN_M3U_URL                - URL to the Uzeen M3U file
     IBOPLAYER_UZEEN_PLAYLIST_ID  - IboPlayer playlist ID to update
-    IBOPLAYER_COOKIE             - IboPlayer authentication cookie
+    IBOPLAYER_MAC_ADDRESS        - IboPlayer device MAC address (for device login)
+    IBOPLAYER_DEVICE_KEY         - IboPlayer device key (for device login)
+    TWOCAPTCHA_API_KEY           - 2captcha key used to solve the login captcha
+    IBOPLAYER_COOKIE             - (optional/legacy) sent alongside the bearer token
 """
 
 import os
@@ -30,13 +33,20 @@ except Exception:
     def send_notification(status, message, details=None):
         return False
 
+import iboplayer_auth
+
 # Load environment variables
 load_dotenv()
 
 # Configuration from environment variables
 UZEEN_M3U_URL = os.getenv("UZEEN_M3U_URL")
 IBOPLAYER_UZEEN_PLAYLIST_ID = os.getenv("IBOPLAYER_UZEEN_PLAYLIST_ID")
-IBOPLAYER_COOKIE = os.getenv("IBOPLAYER_COOKIE")
+
+# Device-login credentials (replace the old static IBOPLAYER_COOKIE auth).
+IBOPLAYER_MAC_ADDRESS = os.getenv("IBOPLAYER_MAC_ADDRESS")
+IBOPLAYER_DEVICE_KEY = os.getenv("IBOPLAYER_DEVICE_KEY")
+TWOCAPTCHA_API_KEY = os.getenv("TWOCAPTCHA_API_KEY")
+
 IBOPLAYER_PLAYLIST_NAME = os.getenv("IBOPLAYER_UZEEN_PLAYLIST_NAME", "Uzeen")
 
 # State file for tracking changes
@@ -54,8 +64,12 @@ def validate_config():
         missing.append("UZEEN_M3U_URL")
     if not IBOPLAYER_UZEEN_PLAYLIST_ID:
         missing.append("IBOPLAYER_UZEEN_PLAYLIST_ID")
-    if not IBOPLAYER_COOKIE:
-        missing.append("IBOPLAYER_COOKIE")
+    if not IBOPLAYER_MAC_ADDRESS:
+        missing.append("IBOPLAYER_MAC_ADDRESS")
+    if not IBOPLAYER_DEVICE_KEY:
+        missing.append("IBOPLAYER_DEVICE_KEY")
+    if not TWOCAPTCHA_API_KEY:
+        missing.append("TWOCAPTCHA_API_KEY")
 
     if missing:
         print("[!] Missing required environment variables:")
@@ -441,11 +455,13 @@ def update_iboplayer_playlist(credentials, max_retries=3):
     """
     print("\n[*] Updating IboPlayer playlist...")
 
-    headers = {
-        "Content-Type": "application/json",
-        "Cookie": IBOPLAYER_COOKIE,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
+    # Authenticate with a device-login bearer token (obtained/cached by
+    # iboplayer_auth). A 401/403 below triggers a token refresh + one retry.
+    try:
+        headers = iboplayer_auth.authed_headers()
+    except Exception as e:
+        print(f"[!] Could not obtain IboPlayer bearer token: {e}")
+        return False
 
     payload = {
         "current_playlist_url_id": IBOPLAYER_UZEEN_PLAYLIST_ID,
@@ -467,6 +483,7 @@ def update_iboplayer_playlist(credentials, max_retries=3):
     print(f"[*] Password: {credentials['password']}")
 
     # Retry loop with exponential backoff
+    relogin_attempted = False
     for attempt in range(1, max_retries + 1):
         try:
             print(f"\n[*] Attempt {attempt}/{max_retries}: Sending request to IboPlayer API...")
@@ -488,6 +505,22 @@ def update_iboplayer_playlist(credentials, max_retries=3):
                 except:
                     print(f"[*] Response text: {response.text}")
                 return True
+
+            elif response.status_code in (401, 403):
+                # Expired/invalid bearer token - refresh it once and retry.
+                print(f"[!] Auth rejected ({response.status_code}): {response.text}")
+                if not relogin_attempted:
+                    relogin_attempted = True
+                    print("[*] Refreshing bearer token and retrying...")
+                    iboplayer_auth.clear_cached_token()
+                    try:
+                        headers = iboplayer_auth.authed_headers(force_refresh=True)
+                    except Exception as e:
+                        print(f"[!] Re-login failed: {e}")
+                        return False
+                    continue
+                print("[!] Re-login already attempted - giving up.")
+                return False
 
             elif response.status_code >= 400 and response.status_code < 500:
                 # Client error - don't retry

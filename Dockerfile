@@ -6,6 +6,7 @@ ENV PYTHONUNBUFFERED=1 \
     DISPLAY=:99
 
 # Install system dependencies
+# libcairo2 is required by cairosvg (used to rasterize the iboplayer login captcha)
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -13,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     unzip \
     xvfb \
+    libcairo2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Google Chrome
@@ -61,6 +63,7 @@ COPY tvcorn_automation.py .
 COPY telegram_notifier.py .
 COPY api_server.py .
 COPY telegram_bot.py .
+COPY iboplayer_auth.py .
 COPY uzeen_playlist_updater.py .
 COPY check_uzeen_expiration.py .
 COPY .env.example .
