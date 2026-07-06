@@ -12,7 +12,6 @@ Commands:
     /uzeen_status - Show current credentials
     /uzeen_history - Show credential change history
     /viewtv - Run ViewTVY free-trial automation
-    /viewtv2 - Run ViewTVY free-trial automation (2nd IBO Player account)
     /webest - Run WEBESTIPTV registration automation
     /tune - Run IPTVtune free-trial automation
     /tune2 - Run IPTVtune free-trial automation (2nd IBO Player account)
@@ -145,7 +144,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/uzeen_status - Show current credentials\n"
         "/uzeen_history - Show credential change history\n"
         "/viewtv - Run ViewTVY free trial\n"
-        "/viewtv2 - ViewTVY free trial (2nd IBO account)\n"
         "/webest - Run WEBESTIPTV registration\n"
         "/tune - Run IPTVtune free trial\n"
         "/tune2 - IPTVtune free trial (2nd IBO account)\n"
@@ -183,7 +181,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Free-trial automations</b> (run in background, ~up to 1h;\n"
         "you get host/username/password when done):\n"
         "<b>/viewtv</b> - ViewTVY free trial\n"
-        "<b>/viewtv2</b> - ViewTVY free trial (2nd IBO account)\n"
         "<b>/webest</b> - WEBESTIPTV registration\n"
         "<b>/tune</b> - IPTVtune free trial\n"
         "<b>/tune2</b> - IPTVtune free trial (2nd IBO account)\n\n"
@@ -416,13 +413,6 @@ async def run_viewtv(update: Update, context: ContextTypes.DEFAULT_TYPE):
                               label="ViewTVY trial", script=VIEWTVY_SCRIPT)
 
 
-async def run_viewtv2(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Trigger the ViewTVY free-trial automation for the 2nd IBO Player account."""
-    await _run_automation_cmd(update, context, key="viewtv2",
-                              label="ViewTVY trial (account 2)", script=VIEWTVY_SCRIPT,
-                              extra_args=["--iboplayer-account", "2"])
-
-
 async def run_webest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Trigger the WEBESTIPTV registration automation."""
     await _run_automation_cmd(update, context, key="webest",
@@ -459,7 +449,7 @@ def main():
     logger.info(f"Poll interval: {POLL_INTERVAL}s")
     logger.info(f"Poll timeout: {POLL_TIMEOUT}s")
     logger.info("Commands: /start, /help, /uzeen, /uzeen_status, /uzeen_history, "
-                "/viewtv, /viewtv2, /webest, /tune, /tune2, /ping")
+                "/viewtv, /webest, /tune, /tune2, /ping")
     logger.info("="*70)
 
     # Create the Application
@@ -473,7 +463,6 @@ def main():
     application.add_handler(CommandHandler("uzeen_status", uzeen_status))
     application.add_handler(CommandHandler("uzeen_history", uzeen_history))
     application.add_handler(CommandHandler("viewtv", run_viewtv))
-    application.add_handler(CommandHandler("viewtv2", run_viewtv2))
     application.add_handler(CommandHandler("webest", run_webest))
     application.add_handler(CommandHandler("tune", run_tune))
     application.add_handler(CommandHandler("tune2", run_tune2))

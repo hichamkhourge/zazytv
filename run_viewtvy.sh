@@ -14,7 +14,6 @@
 #   ./run_viewtvy.sh headless         # Run in headless mode
 #
 #   # Any extra args are passed through to the Python script, e.g.:
-#   ./run_viewtvy.sh --iboplayer-account 2
 #   ./run_viewtvy.sh --user-id 123 --callback-url https://app.com/api/webhooks/viewtvy-automation
 #
 

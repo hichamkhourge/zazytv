@@ -1,34 +1,35 @@
 #!/usr/bin/env python3
 """
-IboPlayer device-login helper (shared).
+IboPlayer device-login helper.
 
 IboPlayer's frontend endpoints (savePlaylist, ...) used to be authenticated with a
-static session cookie (IBOPLAYER_COOKIE). That cookie now expires quickly; the site
-requires a **Bearer token** obtained by logging the device in:
+static session cookie. That cookie now expires quickly; the site requires a
+**Bearer token** obtained by logging the device in:
 
     1. GET  https://iboplayer.com/frontend/captcha/generate  -> {"svg": "...", "token": "..."}
     2. Solve the 2-letter text captcha drawn inside the SVG.
     3. POST https://iboplayer.com/frontend/device/login
            {"mac_address": ..., "device_key": ..., "captcha": <text>, "token": <captcha token>}
-       -> returns a bearer token.
+       -> returns a bearer token (JWT, ~24h).
     4. Call the frontend API with `Authorization: Bearer <token>`.
 
 The captcha is solved with 2captcha's normal (image) solver. The SVG is rasterized
 to PNG with cairosvg first, since 2captcha needs a raster image.
 
-This module is intended to be shared by every script that talks to iboplayer.com
-(uzeen, tvcorn, iptvtune, viewtvy, webest, zazy). Public surface:
+The mac_address/device_key identify the IBO Player device. They can be passed to
+get_bearer_token()/authed_headers() by the caller, or default to the
+IBOPLAYER_MAC_ADDRESS / IBOPLAYER_DEVICE_KEY environment variables.
 
-    get_bearer_token(force_refresh=False) -> str
-    clear_cached_token()
-    authed_headers(extra=None) -> dict
+Public surface:
+    get_bearer_token(mac_address=None, device_key=None, force_refresh=False) -> str
+    authed_headers(mac_address=None, device_key=None, extra=None, force_refresh=False) -> dict
+    clear_cached_token(mac_address=None)
 
-Run `python iboplayer_auth.py` to exercise the full login flow and print the raw
-/device/login response (useful for confirming the token field name).
+Run `python iboplayer_auth.py` to exercise the full login flow.
 
 Environment variables:
-    IBOPLAYER_MAC_ADDRESS   - device MAC address (e.g. b8:13:a0:e0:6e:83)
-    IBOPLAYER_DEVICE_KEY    - device key (e.g. 723486)
+    IBOPLAYER_MAC_ADDRESS   - default device MAC address (e.g. b8:13:a0:e0:6e:83)
+    IBOPLAYER_DEVICE_KEY    - default device key (e.g. 723486)
     TWOCAPTCHA_API_KEY      - 2captcha API key for solving the captcha
     IBOPLAYER_COOKIE        - (optional/legacy) sent alongside the bearer if set
 """
@@ -50,8 +51,6 @@ load_dotenv()
 
 CAPTCHA_URL = "https://iboplayer.com/frontend/captcha/generate"
 LOGIN_URL = "https://iboplayer.com/frontend/device/login"
-
-TOKEN_CACHE_FILE = "iboplayer_token.json"
 
 # Shared User-Agent used across the repo's iboplayer requests.
 USER_AGENT = (
@@ -77,38 +76,52 @@ class IboPlayerAuthError(Exception):
     """Raised when the device-login flow cannot produce a bearer token."""
 
 
+def _resolve_identity(mac_address, device_key):
+    mac = mac_address or IBOPLAYER_MAC_ADDRESS
+    dk = device_key or IBOPLAYER_DEVICE_KEY
+    return mac, dk
+
+
 # ---------------------------------------------------------------------------
-# Token cache
+# Token cache (keyed by mac so different devices don't collide)
 # ---------------------------------------------------------------------------
 
-def _read_cache():
-    if not os.path.exists(TOKEN_CACHE_FILE):
+def _cache_path(mac_address):
+    safe = re.sub(r"[^A-Za-z0-9]", "", mac_address or "default")
+    return f"iboplayer_token_{safe}.json"
+
+
+def _read_cache(mac_address):
+    path = _cache_path(mac_address)
+    if not os.path.exists(path):
         return None
     try:
-        with open(TOKEN_CACHE_FILE, "r") as f:
+        with open(path, "r") as f:
             data = json.load(f)
-        token = data.get("token")
-        return token or None
+        return data.get("token") or None
     except Exception as e:
         print(f"[!] Could not read token cache: {e}")
         return None
 
 
-def _write_cache(token):
+def _write_cache(mac_address, token):
+    path = _cache_path(mac_address)
     try:
-        with open(TOKEN_CACHE_FILE, "w") as f:
+        with open(path, "w") as f:
             json.dump({"token": token, "obtained_at": datetime.now().isoformat()}, f, indent=2)
-        print(f"[✓] Cached bearer token to {TOKEN_CACHE_FILE}")
+        print(f"[✓] Cached bearer token to {path}")
     except Exception as e:
         print(f"[!] Could not write token cache: {e}")
 
 
-def clear_cached_token():
-    """Delete the cached bearer token (call this after a 401/403)."""
+def clear_cached_token(mac_address=None):
+    """Delete the cached bearer token for a device (call after a 401/403)."""
+    mac, _ = _resolve_identity(mac_address, None)
+    path = _cache_path(mac)
     try:
-        if os.path.exists(TOKEN_CACHE_FILE):
-            os.remove(TOKEN_CACHE_FILE)
-            print(f"[*] Cleared cached token ({TOKEN_CACHE_FILE})")
+        if os.path.exists(path):
+            os.remove(path)
+            print(f"[*] Cleared cached token ({path})")
     except Exception as e:
         print(f"[!] Could not clear token cache: {e}")
 
@@ -205,15 +218,13 @@ def _solve_captcha(png_bytes):
 
 
 def _extract_token(login_json):
-    """Pull the bearer token out of the /device/login response (shape unknown)."""
+    """Pull the bearer token out of the /device/login response."""
     if not isinstance(login_json, dict):
         return None
-    # Direct top-level keys.
     for key in _TOKEN_KEYS:
         val = login_json.get(key)
         if isinstance(val, str) and val:
             return val
-    # Nested under a "data" object.
     data = login_json.get("data")
     if isinstance(data, dict):
         for key in _TOKEN_KEYS:
@@ -273,41 +284,46 @@ def _login(session, mac_address, device_key):
 # Public API
 # ---------------------------------------------------------------------------
 
-def get_bearer_token(force_refresh=False):
+def get_bearer_token(mac_address=None, device_key=None, force_refresh=False):
     """
-    Return a valid bearer token, logging in if necessary.
+    Return a valid bearer token for the given device, logging in if necessary.
 
-    Uses the cached token unless force_refresh=True or no cache exists.
+    mac_address/device_key default to the IBOPLAYER_MAC_ADDRESS / IBOPLAYER_DEVICE_KEY
+    environment variables. Uses the cached token unless force_refresh=True.
     """
+    mac, dk = _resolve_identity(mac_address, device_key)
+
     if not force_refresh:
-        cached = _read_cache()
+        cached = _read_cache(mac)
         if cached:
             print("[*] Using cached bearer token")
             return cached
 
-    if not IBOPLAYER_MAC_ADDRESS or not IBOPLAYER_DEVICE_KEY:
+    if not mac or not dk:
         raise IboPlayerAuthError(
-            "IBOPLAYER_MAC_ADDRESS and IBOPLAYER_DEVICE_KEY must be set to log in"
+            "mac_address and device_key must be provided (or set IBOPLAYER_MAC_ADDRESS / "
+            "IBOPLAYER_DEVICE_KEY) to log in"
         )
 
     print("[*] Logging in to iboplayer.com to obtain a bearer token...")
     session = _new_session()
-    token = _login(session, IBOPLAYER_MAC_ADDRESS, IBOPLAYER_DEVICE_KEY)
-    _write_cache(token)
+    token = _login(session, mac, dk)
+    _write_cache(mac, token)
     return token
 
 
-def authed_headers(extra=None, force_refresh=False):
+def authed_headers(mac_address=None, device_key=None, extra=None, force_refresh=False):
     """
     Build request headers authenticated with a bearer token.
 
     The legacy IBOPLAYER_COOKIE, if still set, is sent alongside the bearer in case
     savePlaylist continues to require it.
     """
+    token = get_bearer_token(mac_address, device_key, force_refresh=force_refresh)
     headers = {
         "Content-Type": "application/json",
         "User-Agent": USER_AGENT,
-        "Authorization": f"Bearer {get_bearer_token(force_refresh=force_refresh)}",
+        "Authorization": f"Bearer {token}",
     }
     if IBOPLAYER_COOKIE:
         headers["Cookie"] = IBOPLAYER_COOKIE
@@ -328,18 +344,6 @@ if __name__ == "__main__":
     print(f"[*] Device key: {IBOPLAYER_DEVICE_KEY}")
     print(f"[*] 2captcha key set: {bool(TWOCAPTCHA_API_KEY)}")
 
-    # Dump one rasterized captcha so it can be eyeballed.
-    try:
-        sess = _new_session()
-        svg, ctoken = _generate_captcha(sess)
-        png = _rasterize_svg(svg)
-        with open("captcha_debug.png", "wb") as f:
-            f.write(png)
-        print(f"[✓] Wrote captcha_debug.png ({len(png)} bytes), captcha token: {ctoken}")
-    except Exception as e:
-        print(f"[!] Captcha render check failed: {e}")
-
-    # Full login (forces a fresh solve + login, prints where the token lives).
     try:
         clear_cached_token()
         token = get_bearer_token(force_refresh=True)
