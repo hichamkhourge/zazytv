@@ -33,7 +33,7 @@ services:
       - IBOPLAYER_PLAYLIST_URL_ID=${IBOPLAYER_PLAYLIST_URL_ID}
       - IBOPLAYER_PLAYLIST_NAME=${IBOPLAYER_PLAYLIST_NAME:-Zazy}
       - IBOPLAYER_PLAYLIST_URL=${IBOPLAYER_PLAYLIST_URL:-http://live.zazytv.com}
-      # IBO Player device login (bearer-token auth used by uzeen_playlist_updater and viewtvy)
+      # IBO Player device login (bearer-token auth used by uzeen_playlist_updater, viewtvy and tvcorn)
       - IBOPLAYER_MAC_ADDRESS=${IBOPLAYER_MAC_ADDRESS}
       - IBOPLAYER_DEVICE_KEY=${IBOPLAYER_DEVICE_KEY}
 

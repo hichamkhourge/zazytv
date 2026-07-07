@@ -51,6 +51,8 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 load_dotenv()
 
+import iboplayer_auth
+
 try:
     from telegram_notifier import notifier
 except ImportError:
@@ -88,11 +90,10 @@ GENERATION_MAX_WAIT_SECONDS = int(os.getenv("TVCORN_GENERATION_MAX_WAIT_SECONDS"
 AUTO_EXIT = os.getenv("AUTO_EXIT", "True").lower() == "true"
 TVCORN_DEBUG_DIR = os.getenv("TVCORN_DEBUG_DIR", "/app/logs")
 
-# IBO Player integration (optional). Reuses the shared IBOPLAYER_COOKIE (set in the
-# IBO Player section of .env) like ViewTVY/IPTVtune do; TVCORN_IBOPLAYER_COOKIE can
-# override it for a dedicated device.
+# IBO Player integration (optional). Authentication uses the device-login bearer
+# token from iboplayer_auth (shared IBOPLAYER_MAC_ADDRESS / IBOPLAYER_DEVICE_KEY /
+# TWOCAPTCHA_API_KEY), like viewtvy/uzeen do.
 TVCORN_IBOPLAYER_ENABLED = os.getenv("TVCORN_IBOPLAYER_ENABLED", "False").lower() == "true"
-TVCORN_IBOPLAYER_COOKIE = os.getenv("TVCORN_IBOPLAYER_COOKIE", "") or os.getenv("IBOPLAYER_COOKIE", "")
 TVCORN_IBOPLAYER_PLAYLIST_URL_ID = os.getenv("TVCORN_IBOPLAYER_PLAYLIST_URL_ID", "")
 TVCORN_IBOPLAYER_PLAYLIST_NAME = os.getenv("TVCORN_IBOPLAYER_PLAYLIST_NAME", "tvcorn")
 
@@ -682,21 +683,31 @@ def extract_credentials(driver):
 # IBO Player + webhook + Telegram (optional integrations)
 # ═══════════════════════════════════════════════════════════
 def save_to_iboplayer(username, password, hostname, max_retries=3):
-    """Save the playlist to IBO Player using their API (if enabled)."""
+    """Save the playlist to IBO Player using their API (if enabled).
+
+    Authenticated with a device-login bearer token (obtained/cached by
+    iboplayer_auth); a 401/403 triggers a token refresh + one retry.
+    """
     if not TVCORN_IBOPLAYER_ENABLED:
         print("[*] IBO Player integration disabled (TVCORN_IBOPLAYER_ENABLED=False)")
         return False
-    if not TVCORN_IBOPLAYER_COOKIE or not TVCORN_IBOPLAYER_PLAYLIST_URL_ID:
-        print("[!] IBO Player enabled but TVCORN_IBOPLAYER_COOKIE / _PLAYLIST_URL_ID missing")
+    if (
+        not TVCORN_IBOPLAYER_PLAYLIST_URL_ID
+        or not iboplayer_auth.IBOPLAYER_MAC_ADDRESS
+        or not iboplayer_auth.IBOPLAYER_DEVICE_KEY
+        or not iboplayer_auth.TWOCAPTCHA_API_KEY
+    ):
+        print("[!] IBO Player enabled but TVCORN_IBOPLAYER_PLAYLIST_URL_ID / "
+              "IBOPLAYER_MAC_ADDRESS / IBOPLAYER_DEVICE_KEY / TWOCAPTCHA_API_KEY missing")
         return False
 
     api_url = "https://iboplayer.com/frontend/device/savePlaylist"
-    headers = {
-        "Content-Type": "application/json",
-        "Cookie": TVCORN_IBOPLAYER_COOKIE,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    }
+    try:
+        headers = iboplayer_auth.authed_headers()
+    except Exception as e:
+        print(f"[!] Could not obtain IBO Player bearer token: {e}")
+        return False
+
     payload = {
         "current_playlist_url_id": TVCORN_IBOPLAYER_PLAYLIST_URL_ID,
         "password": password,
@@ -709,12 +720,40 @@ def save_to_iboplayer(username, password, hostname, max_retries=3):
         "xml_url": "",
     }
     print("[*] Saving playlist to IBO Player...")
+    relogin_attempted = False
     for attempt in range(1, max_retries + 1):
         try:
             response = requests.post(api_url, json=payload, headers=headers, timeout=30)
             if response.status_code == 200:
-                print("[OK] Playlist saved to IBO Player")
-                return True
+                # HTTP 200 alone is NOT success: IBO Player returns
+                # {"status":"error"} in the body when it rejects the save.
+                try:
+                    response_data = response.json()
+                except Exception:
+                    response_data = None
+                if isinstance(response_data, dict) and response_data.get("status") == "success":
+                    print("[OK] Playlist saved to IBO Player")
+                    return True
+                print(f"[!] IBO Player rejected the save (status != success): "
+                      f"{response_data if response_data is not None else response.text[:300]}")
+                print("[!] Most common cause: TVCORN_IBOPLAYER_PLAYLIST_URL_ID is not a playlist "
+                      f"owned by the logged-in device ({iboplayer_auth.IBOPLAYER_MAC_ADDRESS}).")
+                return False
+            if response.status_code in (401, 403):
+                # Expired/invalid bearer token - refresh it once and retry.
+                print(f"[!] IBO Player auth rejected ({response.status_code}): {response.text[:200]}")
+                if not relogin_attempted:
+                    relogin_attempted = True
+                    print("[*] Refreshing bearer token and retrying...")
+                    iboplayer_auth.clear_cached_token()
+                    try:
+                        headers = iboplayer_auth.authed_headers(force_refresh=True)
+                    except Exception as e:
+                        print(f"[!] Re-login failed: {e}")
+                        return False
+                    continue
+                print("[!] Re-login already attempted - giving up.")
+                return False
             if 400 <= response.status_code < 500:
                 print(f"[!] IBO Player config error {response.status_code}: {response.text[:200]}")
                 return False
