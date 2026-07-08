@@ -5,7 +5,7 @@
 # Rotates the source IP each run through free public proxies (WEBEST_USE_PROXY=True,
 # the default): a proxy list is fetched from a public API, validated, and the browser
 # egresses through a working proxy. Uses the disposable temp-mail backend
-# (WEBEST_EMAIL_BACKEND=tempmaillol) to capture the welcome/verification email.
+# (WEBEST_EMAIL_BACKEND=procmail, with mail.tm fallback) to capture the OTP email.
 #
 # Usage:
 #   ./run_webest.sh                   # Headless, via free proxy (default)
@@ -60,7 +60,7 @@ echo "HEADLESS:             $HEADLESS"
 echo "AUTO_EXIT:            $AUTO_EXIT"
 echo "WEBEST_USE_PROXY:     $WEBEST_USE_PROXY"
 echo "PROXY_PROTOCOL:       ${WEBEST_PROXY_PROTOCOL:-http}"
-echo "EMAIL_BACKEND:        ${WEBEST_EMAIL_BACKEND:-tempmaillol}"
+echo "EMAIL_BACKEND:        ${WEBEST_EMAIL_BACKEND:-procmail}"
 echo "PYTHON:               $PYTHON"
 echo "======================================"
 echo ""

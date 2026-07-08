@@ -12,7 +12,7 @@ form (in the same browser session), landing on the dashboard.
 Design (matches the rest of this repo's automations):
   * Random user data via generate_random_user_data() (reused from iptvvcanada).
   * A receiving inbox via the temp-mail backend already built into the codebase
-    (defaults to tempmaillol on newer branches, mail.tm on main) for the OTP code.
+    (defaults to procmail, with an automatic fallback to mail.tm) for the OTP code.
   * Source IP rotated each run via free public proxies (free, no signup): a proxy
     list is fetched from a public API (ProxyScrape by default), each candidate is
     validated against api.ipify.org, and the browser egresses through a working one.
@@ -23,7 +23,8 @@ Config (env vars, all optional):
   * WEBEST_PROXY_PROTOCOL=http      - http | socks4 | socks5.
   * WEBEST_PROXY_LIST_URL=<url>     - proxy-list API ({proto} placeholder substituted).
   * WEBEST_PROXY_MAX_TRIES=30       - candidate proxies to test per attempt.
-  * WEBEST_EMAIL_BACKEND=tempmaillol - tempmaillol | mailtm | gmail.
+  * WEBEST_EMAIL_BACKEND=procmail   - procmail | mailtm (sets the preferred provider;
+    the other is used as an automatic fallback). procmail reuses PROCMAIL_API_BASE.
   * Needs PySocks (already in requirements) only when PROXY_PROTOCOL is socks4/socks5.
 
 Run (headed, first test):
@@ -41,11 +42,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# On branches that have the newer email dispatcher, the temp-mail backend is selected at
-# iptvvcanada import time from IPTVV_EMAIL_BACKEND. This script wants a disposable inbox,
-# so set its own WEBEST_EMAIL_BACKEND (default "tempmaillol") *before* importing the module.
-# Harmless on older branches (main) that only expose the mail.tm backend.
-os.environ["IPTVV_EMAIL_BACKEND"] = os.getenv("WEBEST_EMAIL_BACKEND", "tempmaillol")
+# The temp-mail backend is selected in iptvvcanada at import time from IPTVV_EMAIL_BACKEND.
+# This script wants a disposable inbox, so set its own WEBEST_EMAIL_BACKEND *before* importing
+# the module. Default is "procmail" (api.procmail.xyz) — no domain/account round-trips — with
+# an automatic fallback to mail.tm if procmail is unavailable (see create_inbox()).
+os.environ["IPTVV_EMAIL_BACKEND"] = os.getenv("WEBEST_EMAIL_BACKEND", "procmail")
 
 import undetected_chromedriver as uc
 from selenium import webdriver
@@ -60,23 +61,16 @@ from webdriver_manager.chrome import ChromeDriverManager
 # These exist on every branch.
 from iptvvcanada_automation import (
     create_mailtm_account,
+    create_procmail_inbox,
     find_clickable_by_text,
     generate_random_user_data,
     get_mailtm_message_by_id,
     get_mailtm_messages,
+    get_procmail_messages,
     get_random_user_agent,
     safe_click,
     save_page_debug_artifacts,
 )
-
-# The unified backend dispatcher (create_email_account / tempmaillol) only exists on the
-# newer "harden" branch. Detect it so this script works on main too (mail.tm fallback).
-try:
-    from iptvvcanada_automation import create_email_account as _create_email_account
-    _HAS_EMAIL_DISPATCH = True
-except ImportError:
-    _create_email_account = None
-    _HAS_EMAIL_DISPATCH = False
 
 # Telegram notifier (configured via TELEGRAM_* in .env). Fall back to a no-op so the script
 # still runs if the module/deps are unavailable.
@@ -92,18 +86,44 @@ except Exception:
     notifier = _DummyNotifier()
 
 
-def create_inbox():
-    """Allocate a disposable inbox, branch-agnostic.
+def _new_procmail_session():
+    """Allocate a procmail inbox. Returns a session dict or None."""
+    address = create_procmail_inbox()
+    if not address:
+        return None
+    return {"backend": "procmail", "address": address}
 
-    Returns a session dict with at least 'address' and 'token', or None on failure.
-    Uses the newer create_email_account() dispatcher when present, else mail.tm directly.
-    """
-    if _HAS_EMAIL_DISPATCH:
-        return _create_email_account()
+
+def _new_mailtm_session():
+    """Allocate a mail.tm inbox. Returns a session dict or None."""
     address, password, token = create_mailtm_account()
     if not address:
         return None
     return {"backend": "mailtm", "address": address, "password": password, "token": token}
+
+
+def create_inbox():
+    """Allocate a disposable inbox with an automatic provider fallback.
+
+    Default order is procmail then mail.tm; setting WEBEST_EMAIL_BACKEND=mailtm reverses it.
+    Returns a session dict carrying 'backend' and 'address' (mail.tm also carries 'token'),
+    or None only if every provider fails.
+    """
+    prefer_mailtm = os.getenv("WEBEST_EMAIL_BACKEND", "procmail").strip().lower() == "mailtm"
+    if prefer_mailtm:
+        providers = (("mail.tm", _new_mailtm_session), ("procmail", _new_procmail_session))
+    else:
+        providers = (("procmail", _new_procmail_session), ("mail.tm", _new_mailtm_session))
+
+    for idx, (name, factory) in enumerate(providers):
+        if idx:
+            print(f"[*] Falling back to {name} for the receiving inbox...")
+        session = factory()
+        if session:
+            print(f"[OK] Receiving inbox ready via {name}: {session['address']}")
+            return session
+        print(f"[!] {name} inbox creation failed.")
+    return None
 
 # ═══════════════════════════════════════════════════════════
 # Configuration
@@ -595,10 +615,9 @@ def extract_otp(text):
 def _inbox_messages(session):
     """Return inbox messages (each a dict with subject/text/html), branch/backend-agnostic."""
     backend = session.get("backend")
-    if backend == "tempmaillol":
-        # harden branch only; its messages are already complete.
-        from iptvvcanada_automation import get_tempmaillol_messages
-        return get_tempmaillol_messages(session["token"])
+    if backend == "procmail":
+        # procmail returns messages with bodies inline; no per-id fetch needed.
+        return get_procmail_messages(session["address"])
 
     # mail.tm: list endpoint returns summaries; fetch each body by id.
     token = session["token"]
